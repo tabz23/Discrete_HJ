@@ -553,6 +553,110 @@ def plot_convergence(conv_upper: np.ndarray, conv_lower: np.ndarray, filename: s
     plt.close()
     print(f"Convergence plot saved to {filename}")
 
+import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle, Circle
+import numpy as np
+
+def plot_reachability_single_cell(env, cell_tree, reachability, cell_idx=None,
+                                  n_samples=50, figsize=(7,7)):
+    """
+    Visualize reachable cells from a single source cell for each action,
+    with colored arrows for reachability and small vectors showing true one-step dynamics
+    from sampled points within the source cell.
+    """
+    leaves = cell_tree.get_leaves()
+    n_cells = len(leaves)
+    if cell_idx is None:
+        cell_idx = n_cells // 2
+    src_cell = leaves[cell_idx]
+    src_center = src_cell.center[:2]
+    theta_center = src_cell.center[2]
+
+    # Setup figure
+    bounds = env.get_state_bounds()
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.set_xlim(bounds[0])
+    ax.set_ylim(bounds[1])
+    ax.set_aspect('equal')
+    ax.grid(True, alpha=0.2)
+    ax.set_title(
+        f"Reachable cells from cell #{cell_idx} "
+        f"(θ={theta_center:.2f} rad, {np.degrees(theta_center):.1f}°)"
+    )
+
+    # Colors
+    action_colors = {-1.0: 'blue', 0.0: 'green', 1.0: 'orange'}
+    offset_angles = {-1.0: -8*np.pi/180, 0.0: 0.0, 1.0: 8*np.pi/180}
+
+    # Draw grid
+    for cell in leaves:
+        rect = Rectangle((cell.bounds[0,0], cell.bounds[1,0]),
+                         cell.get_range(0), cell.get_range(1),
+                         fill=False, edgecolor='gray', linewidth=0.4, alpha=0.3)
+        ax.add_patch(rect)
+
+    # Highlight source cell
+    rect_src = Rectangle((src_cell.bounds[0,0], src_cell.bounds[1,0]),
+                         src_cell.get_range(0), src_cell.get_range(1),
+                         fill=False, edgecolor='black', linewidth=2.0)
+    ax.add_patch(rect_src)
+    ax.plot(*src_center, 'ko', markersize=6, label='Source cell center')
+
+    # (1) Grid-level reachability (colored large arrows)
+    for action in env.get_action_space():
+        succ_cells = reachability.compute_successor_cells(src_cell, action, cell_tree)
+        color = action_colors[action]
+        offset_angle = offset_angles[action]
+
+        for dst_cell in succ_cells:
+            dst_center = dst_cell.center[:2]
+            dx = dst_center[0] - src_center[0]
+            dy = dst_center[1] - src_center[1]
+
+            if offset_angle != 0.0:
+                rot = np.array([[np.cos(offset_angle), -np.sin(offset_angle)],
+                                [np.sin(offset_angle),  np.cos(offset_angle)]])
+                dx, dy = rot @ np.array([dx, dy])
+
+            ax.arrow(src_center[0], src_center[1], dx, dy,
+                     color=color, alpha=0.6, linewidth=2.0,
+                     head_width=0.10, length_includes_head=True)
+
+        ax.plot([], [], color=color, linewidth=2.0, label=f"Action {action:+.0f}")
+
+    # (2) Local sample-based visualization (short motion vectors)
+    rng = np.random.default_rng(0)
+    samples = np.column_stack([
+        rng.uniform(src_cell.bounds[0,0], src_cell.bounds[0,1], n_samples),
+        rng.uniform(src_cell.bounds[1,0], src_cell.bounds[1,1], n_samples),
+        rng.uniform(src_cell.bounds[2,0], src_cell.bounds[2,1], n_samples)
+    ])
+
+    for s in samples:
+        x0, y0 = s[:2]
+        for action in env.get_action_space():##doesnt matter since action doesn't affect delta x and delta y using our discretized dynamics
+            color = action_colors[action]
+            next_s = env.dynamics(s, action)
+            dx = next_s[0] - x0
+            dy = next_s[1] - y0
+
+            # scale vector for visibility — relative to motion magnitude
+            scale = 1.0  # can tweak (e.g., 1.0 or 0.5)
+            ax.plot([x0, x0 + scale*dx], [y0, y0 + scale*dy],
+                    color=color, alpha=0.9, linewidth=1.8, zorder=5)
+
+        # mark start point
+        ax.plot(x0, y0, 'ko', markersize=3, alpha=0.7)
+
+    # Obstacle
+    if isinstance(env, DubinsCarEnvironment):
+        obstacle = Circle(env.obstacle_position, env.obstacle_radius,
+                          color='red', alpha=0.5, zorder=4)
+        ax.add_patch(obstacle)
+
+    ax.legend(loc='upper left', fontsize=9)
+    plt.tight_layout()
+    plt.show()
 
 # ============================================================================
 # MAIN INTERFACE
@@ -585,7 +689,8 @@ def run_algorithm_1(args):
     else:
         reachability = ReachabilityAnalyzer(env, samples_per_dim=args.samples)
         print(f"  Using sampling-based reachability ({args.samples} samples/dim)")
-    
+    plot_reachability_single_cell(env, cell_tree, reachability, cell_idx=45)
+
     value_iter = SafetyValueIterator(env=env, gamma=args.gamma, cell_tree=cell_tree,
                                      reachability=reachability, output_dir=args.output_dir)
     
@@ -683,3 +788,14 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+    
+    
+    
+    
+    
+    
+#              ↑ θ = π/2 (90)
+#  θ = π (180) ←----o----→  θ = 0
+#              |
+#              ↓ θ = -π/2 (-90)
