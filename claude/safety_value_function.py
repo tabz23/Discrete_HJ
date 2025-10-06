@@ -69,8 +69,8 @@ class DubinsCarEnvironment(Environment):
             self.obstacle_position = obstacle_position
             
         self.obstacle_radius = obstacle_radius
-        self.L_f = v_const
-        self.L_l = 1.0
+        self.L_f = 1.0 + v_const * dt        # from Jacobian bound (∞-norm)
+        self.L_l = np.sqrt(2)                # from signed distance gradient bound
         self.actions = [-1.0, 0.0, 1.0]
     
     def get_state_bounds(self) -> np.ndarray:
@@ -255,8 +255,8 @@ class LipschitzReachabilityAnalyzer(ReachabilityAnalyzer):
         center = cell.center
         center_next = self.env.dynamics(center, action)
         L_f, _ = self.env.get_lipschitz_constants()
-        eta = cell.get_max_range()
-        print("eta",eta)
+        eta = 0.5 * cell.get_max_range()
+        # print("eta",eta)
         reach_bounds = np.zeros((self.env.get_state_dim(), 2))
         expansion = L_f * eta
         for j in range(self.env.get_state_dim()):
@@ -291,7 +291,18 @@ class SafetyValueIterator:
     def initialize_cells(self):
         for cell in self.cell_tree.get_leaves():
             l_center = self.env.failure_function(cell.center)
-            eta = cell.get_max_range()
+            '''
+            Each cell s has a center x_c(s) and spatial extent (bounds).
+            The grid resolution parameter η defines the maximal deviation
+            between any point x ∈ s and the cell center x_c(s) in ∞-norm:
+
+                ||x - x_c(s)||_∞ ≤ η.
+
+            Because each cell is a hyper-rectangle, the farthest point from
+            the center lies at half the side length in the largest dimension.
+            Therefore, η = 0.5 * (maximum side length of the cell)
+            '''
+            eta = 0.5 * cell.get_max_range()#
             print("eta",eta)
             cell.l_lower = l_center - self.L_l * eta
             cell.l_upper = l_center + self.L_l * eta
@@ -845,8 +856,8 @@ def main():
                        help="Algorithm to run: 1 (basic) or 2 (adaptive)")
     parser.add_argument('--velocity', type=float, default=1.0, help="Constant velocity")
     parser.add_argument('--dt', type=float, default=0.1, help="Time step")
-    parser.add_argument('--obstacle-radius', type=float, default=0.5, help="Obstacle radius")
-    parser.add_argument('--gamma', type=float, default=0.95, help="Discount factor")
+    parser.add_argument('--obstacle-radius', type=float, default=1.3, help="Obstacle radius")
+    parser.add_argument('--gamma', type=float, default=0.9, help="Discount factor")
     
     # Algorithm 1
     parser.add_argument('--resolution', type=int, default=10, help="Grid resolution")
