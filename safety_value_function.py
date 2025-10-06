@@ -70,7 +70,7 @@ class DubinsCarEnvironment(Environment):
             
         self.obstacle_radius = obstacle_radius
         self.L_f = 1.0 + v_const * dt        # from Jacobian bound (∞-norm)
-        self.L_l = np.sqrt(2)                # from signed distance gradient bound
+        self.L_l = np.rad(2)          # from signed distance gradient bound
         self.actions = [-1.0, 0.0, 1.0]
     
     def get_state_bounds(self) -> np.ndarray:
