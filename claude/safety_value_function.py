@@ -320,7 +320,7 @@ class SafetyValueIterator:
         return new_V_upper, new_V_lower
     
     def value_iteration(self, max_iterations: int = 1000, convergence_tol: float = 1e-3,
-                       plot_freq: int = 10) -> Tuple[np.ndarray, np.ndarray]:
+                        plot_freq: int = 10) -> Tuple[np.ndarray, np.ndarray]:
         self.initialize_cells()
         conv_history_upper = []
         conv_history_lower = []
