@@ -306,8 +306,8 @@ class SafetyValueIterator:
             print("eta",eta)
             cell.l_lower = l_center - self.L_l * eta
             cell.l_upper = l_center + self.L_l * eta
-            cell.V_lower = cell.l_lower
-            cell.V_upper = cell.l_upper
+            cell.V_lower = -np.inf
+            cell.V_upper = np.inf
     
     def bellman_update(self, cell: Cell) -> Tuple[float, float]:
         max_upper = -np.inf
@@ -465,16 +465,16 @@ class AdaptiveRefinement:
 # ============================================================================
 # VISUALIZATION
 # ============================================================================
-
 def plot_value_function(env: Environment, cell_tree: CellTree, filename: str,
                        iteration: int, theta_slices: list = None):
     if theta_slices is None:
         theta_slices = [0, np.pi/4, np.pi/2]
     
     n_slices = len(theta_slices)
-    fig, axes = plt.subplots(2, n_slices, figsize=(5*n_slices, 10))
+    # 3 rows: (1) V_upper slice, (2) V_lower slice, (3) classification slice
+    fig, axes = plt.subplots(3, n_slices, figsize=(5*n_slices, 14))
     if n_slices == 1:
-        axes = axes.reshape(2, 1)
+        axes = axes.reshape(3, 1)
     
     for idx, theta in enumerate(theta_slices):
         ax_upper = axes[0, idx]
@@ -484,12 +484,68 @@ def plot_value_function(env: Environment, cell_tree: CellTree, filename: str,
         ax_lower = axes[1, idx]
         _plot_slice(env, cell_tree, theta, ax_lower, "V_γ", upper=False)
         ax_lower.set_title(f"Lower Bound V_γ (θ={theta:.2f} rad)")
-    
+
+        ax_cls = axes[2, idx]
+        _plot_classification_slice(env, cell_tree, theta, ax_cls)
+        ax_cls.set_title(f"Cell classification (θ={theta:.2f} rad)")
+
     fig.suptitle(f"Safety Value Function - Iteration {iteration}", fontsize=16)
     plt.tight_layout()
     plt.savefig(filename, dpi=150, bbox_inches='tight')
     plt.close()
+from matplotlib.patches import Patch
 
+def _plot_classification_slice(env: Environment, cell_tree: CellTree, theta: float, ax):
+    bounds = env.get_state_bounds()
+    x_min, x_max = bounds[0]
+    y_min, y_max = bounds[1]
+
+    # Colors: red=unsafe, green=safe, gray=boundary
+    C_UNSAFE = "#d62728"
+    C_SAFE   = "#2ca02c"
+    C_BOUND  = "#7f7f7f"
+
+    # Draw cells that intersect this theta slice
+    for cell in cell_tree.get_leaves():
+        # Only show cells whose theta-interval contains this slice
+        if not (cell.bounds[2,0] <= theta <= cell.bounds[2,1]):
+            continue
+        if cell.V_upper is None or cell.V_lower is None:
+            continue
+
+        # Classification by sign agreement
+        if (cell.V_lower > 0) and (cell.V_upper > 0):
+            face = C_SAFE
+        elif (cell.V_lower < 0) and (cell.V_upper < 0):
+            face = C_UNSAFE
+        else:
+            face = C_BOUND
+
+        rect = Rectangle(
+            (cell.bounds[0,0], cell.bounds[1,0]),
+            cell.get_range(0), cell.get_range(1),
+            facecolor=face, edgecolor="black", linewidth=0.4, alpha=0.9
+        )
+        ax.add_patch(rect)
+
+    # Obstacle for reference
+    if isinstance(env, DubinsCarEnvironment):
+        obstacle = Circle(env.obstacle_position, env.obstacle_radius,
+                          color='red', alpha=0.5, zorder=10)
+        ax.add_patch(obstacle)
+
+    # Formatting
+    ax.set_xlabel('x'); ax.set_ylabel('y')
+    ax.set_xlim(x_min, x_max); ax.set_ylim(y_min, y_max)
+    ax.set_aspect('equal'); ax.grid(True, alpha=0.2)
+
+    # Small legend
+    legend_elems = [
+        Patch(facecolor=C_SAFE, edgecolor='black', label='definitely safe (V̲>0 & V̄>0)'),
+        Patch(facecolor=C_UNSAFE, edgecolor='black', label='definitely unsafe (V̲<0 & V̄<0)'),
+        Patch(facecolor=C_BOUND, edgecolor='black', label='boundary (mixed signs)'),
+    ]
+    ax.legend(handles=legend_elems, loc='upper right', fontsize=8, framealpha=0.9)
 
 def _plot_slice(env: Environment, cell_tree: CellTree, theta: float, ax, label: str, upper: bool):
     bounds = env.get_state_bounds()
