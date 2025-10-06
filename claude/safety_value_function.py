@@ -256,6 +256,7 @@ class LipschitzReachabilityAnalyzer(ReachabilityAnalyzer):
         center_next = self.env.dynamics(center, action)
         L_f, _ = self.env.get_lipschitz_constants()
         eta = cell.get_max_range()
+        print("eta",eta)
         reach_bounds = np.zeros((self.env.get_state_dim(), 2))
         expansion = L_f * eta
         for j in range(self.env.get_state_dim()):
@@ -291,6 +292,7 @@ class SafetyValueIterator:
         for cell in self.cell_tree.get_leaves():
             l_center = self.env.failure_function(cell.center)
             eta = cell.get_max_range()
+            print("eta",eta)
             cell.l_lower = l_center - self.L_l * eta
             cell.l_upper = l_center + self.L_l * eta
             cell.V_lower = cell.l_lower
@@ -330,6 +332,8 @@ class SafetyValueIterator:
         print(f"Number of cells: {self.cell_tree.get_num_leaves()}")
         
         for iteration in range(max_iterations):
+            if (iteration ) % plot_freq == 0:
+                self._save_plot(iteration + 1)
             prev_upper = {cell.cell_id: cell.V_upper for cell in self.cell_tree.get_leaves()}
             prev_lower = {cell.cell_id: cell.V_lower for cell in self.cell_tree.get_leaves()}
             
@@ -352,8 +356,7 @@ class SafetyValueIterator:
             print(f"Iteration {iteration + 1}: ||V̄^k - V̄^{{k-1}}||_∞ = {diff_upper:.6f}, "
                   f"||V_^k - V_^{{k-1}}||_∞ = {diff_lower:.6f}")
             
-            if (iteration + 1) % plot_freq == 0:
-                self._save_plot(iteration + 1)
+
             
             if diff_upper < convergence_tol and diff_lower < convergence_tol:
                 print(f"\nConverged at iteration {iteration + 1}!")
@@ -556,14 +559,17 @@ def plot_convergence(conv_upper: np.ndarray, conv_lower: np.ndarray, filename: s
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, Circle
 import numpy as np
-
 def plot_reachability_single_cell(env, cell_tree, reachability, cell_idx=None,
-                                  n_samples=50, figsize=(7,7)):
+                                  n_samples=50, figsize=(7,7),
+                                  save_dir="./results", filename_prefix="reachability"):
     """
     Visualize reachable cells from a single source cell for each action,
     with colored arrows for reachability and small vectors showing true one-step dynamics
     from sampled points within the source cell.
+    Saves plot to /results directory instead of displaying it.
     """
+    os.makedirs(save_dir, exist_ok=True)
+
     leaves = cell_tree.get_leaves()
     n_cells = len(leaves)
     if cell_idx is None:
@@ -602,7 +608,7 @@ def plot_reachability_single_cell(env, cell_tree, reachability, cell_idx=None,
     ax.add_patch(rect_src)
     ax.plot(*src_center, 'ko', markersize=6, label='Source cell center')
 
-    # (1) Grid-level reachability (colored large arrows)
+    # (1) Grid-level reachability
     for action in env.get_action_space():
         succ_cells = reachability.compute_successor_cells(src_cell, action, cell_tree)
         color = action_colors[action]
@@ -624,7 +630,7 @@ def plot_reachability_single_cell(env, cell_tree, reachability, cell_idx=None,
 
         ax.plot([], [], color=color, linewidth=2.0, label=f"Action {action:+.0f}")
 
-    # (2) Local sample-based visualization (short motion vectors)
+    # (2) Local sample-based small motion vectors
     rng = np.random.default_rng(0)
     samples = np.column_stack([
         rng.uniform(src_cell.bounds[0,0], src_cell.bounds[0,1], n_samples),
@@ -634,18 +640,13 @@ def plot_reachability_single_cell(env, cell_tree, reachability, cell_idx=None,
 
     for s in samples:
         x0, y0 = s[:2]
-        for action in env.get_action_space():##doesnt matter since action doesn't affect delta x and delta y using our discretized dynamics
+        for action in env.get_action_space():
             color = action_colors[action]
             next_s = env.dynamics(s, action)
             dx = next_s[0] - x0
             dy = next_s[1] - y0
-
-            # scale vector for visibility — relative to motion magnitude
-            scale = 1.0  # can tweak (e.g., 1.0 or 0.5)
-            ax.plot([x0, x0 + scale*dx], [y0, y0 + scale*dy],
+            ax.plot([x0, x0 + dx], [y0, y0 + dy],
                     color=color, alpha=0.9, linewidth=1.8, zorder=5)
-
-        # mark start point
         ax.plot(x0, y0, 'ko', markersize=3, alpha=0.7)
 
     # Obstacle
@@ -656,7 +657,93 @@ def plot_reachability_single_cell(env, cell_tree, reachability, cell_idx=None,
 
     ax.legend(loc='upper left', fontsize=9)
     plt.tight_layout()
-    plt.show()
+
+    # --- Save and close ---
+    filename = os.path.join(save_dir, f"{filename_prefix}_cell{cell_idx}.png")
+    plt.savefig(filename, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"Saved reachability plot to {filename}")
+
+import matplotlib.colors as mcolors
+import matplotlib.colors as mcolors
+
+import matplotlib.colors as mcolors
+from matplotlib.patches import Rectangle, Circle
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+
+def plot_failure_function_bounds(env, cell_tree, filename_prefix="ell_bounds", save_dir="./results"):
+    """
+    Visualize ℓ_lower and ℓ_upper for all cells as two side-by-side heatmaps,
+    each with its own color normalization and value annotations.
+    Saves automatically to /results.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    leaves = cell_tree.get_leaves()
+    bounds = env.get_state_bounds()
+    x_min, x_max = bounds[0]
+    y_min, y_max = bounds[1]
+
+    # Collect all ℓ values for normalization
+    vals_lower = [c.l_lower for c in leaves if c.l_lower is not None]
+    vals_upper = [c.l_upper for c in leaves if c.l_upper is not None]
+    vmin_lower, vmax_lower = np.min(vals_lower), np.max(vals_lower)
+    vmin_upper, vmax_upper = np.min(vals_upper), np.max(vals_upper)
+
+    cmap = plt.cm.RdYlGn
+    norms = {
+        "l_lower": mcolors.Normalize(vmin=vmin_lower, vmax=vmax_lower),
+        "l_upper": mcolors.Normalize(vmin=vmin_upper, vmax=vmax_upper),
+    }
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 6))
+    titles = [r"$\ell_{\mathrm{lower}}(s)$", r"$\ell_{\mathrm{upper}}(s)$"]
+
+    for ax, attr, title in zip(axes, ["l_lower", "l_upper"], titles):
+        norm = norms[attr]
+        for cell in leaves:
+            val = getattr(cell, attr)
+            if val is None:
+                continue
+            color = cmap(norm(val))
+            rect = Rectangle(
+                (cell.bounds[0, 0], cell.bounds[1, 0]),
+                cell.get_range(0),
+                cell.get_range(1),
+                facecolor=color,
+                edgecolor="black",
+                linewidth=0.4
+            )
+            ax.add_patch(rect)
+
+            # --- draw numerical value at cell center ---
+            cx, cy = cell.center[:2]
+            color_text = "white" if val < 0 else "black"
+            ax.text(cx, cy, f"{val:.2f}", ha="center", va="center",
+                    fontsize=6, color=color_text)
+
+        if isinstance(env, DubinsCarEnvironment):
+            obstacle = Circle(env.obstacle_position, env.obstacle_radius, color='red', alpha=0.5)
+            ax.add_patch(obstacle)
+
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+        ax.set_aspect('equal')
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3)
+
+        # Colorbar (individual)
+        sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+        cbar = plt.colorbar(sm, ax=ax)
+        cbar.set_label(r"$\ell$ value", rotation=270, labelpad=15)
+
+    plt.tight_layout()
+    filename = os.path.join(save_dir, f"{filename_prefix}.png")
+    plt.savefig(filename, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"Saved ℓ-bounds plot to {filename}")
+
 
 # ============================================================================
 # MAIN INTERFACE
@@ -693,7 +780,9 @@ def run_algorithm_1(args):
 
     value_iter = SafetyValueIterator(env=env, gamma=args.gamma, cell_tree=cell_tree,
                                      reachability=reachability, output_dir=args.output_dir)
-    
+    value_iter.initialize_cells()
+    plot_failure_function_bounds(env, value_iter.cell_tree)
+
     start_time = time.time()
     conv_upper, conv_lower = value_iter.value_iteration(max_iterations=args.iterations,
                                                         convergence_tol=args.tolerance,
