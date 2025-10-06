@@ -1503,7 +1503,8 @@ def run_algorithm_1(args):
     
     # Create environment
     env = DubinsCarEnvironment(
-        v_const=args.velocity,dt=args.dt,
+        v_const=args.velocity,
+        dt=args.dt,
         obstacle_radius=args.obstacle_radius
     )
     
@@ -1526,25 +1527,34 @@ def run_algorithm_1(args):
         reachability = ReachabilityAnalyzer(env, samples_per_dim=args.samples)
         print(f"  Using sampling-based reachability ({args.samples} samples/dim)")
     
-    # Optional: Plot reachability from a sample cell
-    if args.plot_reachability:
-        print("\nGenerating reachability visualization...")
-        plot_reachability_single_cell(env, cell_tree, reachability, cell_idx=45)
-    
-    # Create value iterator
+    # Create value iterator (this sets output_dir based on reachability type)
     value_iter = SafetyValueIterator(
         env=env,
         gamma=args.gamma,
         cell_tree=cell_tree,
         reachability=reachability,
-        output_dir=None
+        output_dir=None  # None triggers automatic naming
     )
     
+    # Optional: Plot reachability from a sample cell
+    # FIXED: Now uses value_iter.output_dir instead of hardcoded path
+    if args.plot_reachability:
+        print("\nGenerating reachability visualization...")
+        plot_reachability_single_cell(
+            env, cell_tree, reachability, 
+            cell_idx=45, 
+            save_dir=value_iter.output_dir  # ← CHANGE HERE
+        )
+    
     # Optional: Plot failure function bounds
+    # FIXED: Now uses value_iter.output_dir instead of hardcoded path
     if args.plot_failure:
         print("Generating failure function bounds visualization...")
         value_iter.initialize_cells()
-        plot_failure_function_bounds(env, value_iter.cell_tree, save_dir=args.output_dir)
+        plot_failure_function_bounds(
+            env, value_iter.cell_tree, 
+            save_dir=value_iter.output_dir  # ← CHANGE HERE
+        )
     
     # Run value iteration
     start_time = time.time()
@@ -1564,9 +1574,8 @@ def run_algorithm_1(args):
     print(f"Total iterations: {len(conv_upper)}")
     
     # Plot convergence
-    plot_convergence(conv_upper, conv_lower, f"{args.output_dir}/convergence.png")
-    print(f"\nAll results saved to: {args.output_dir}/")
-
+    plot_convergence(conv_upper, conv_lower, f"{value_iter.output_dir}/convergence.png")
+    print(f"\nAll results saved to: {value_iter.output_dir}/")  # ← CHANGE HERE TOO
 
 def run_algorithm_2(args):
     """Runs Algorithm 2/3: Adaptive refinement."""
@@ -1727,3 +1736,7 @@ Theory summary:
 - Soundness: V_γ(s) ≤ Vγ(x) ≤ V̄_γ(s) for all x in s (Theorem 3)
 - Adaptive refinement minimizes cells at tolerance ε (Algorithm 2/3)
 """
+
+
+#python safety_value_function_2.py --algorithm 1 --resolution 10 --iterations 100 --lipschitz-reach --plot-failure  --plot-reachability
+#python safety_value_function_2.py --algorithm 1 --resolution 10 --iterations 100 --plot-failure  --plot-reachability
