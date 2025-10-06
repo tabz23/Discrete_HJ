@@ -272,35 +272,27 @@ class Cell:
         return True
     
     def split(self, next_id: int) -> Tuple['Cell', 'Cell']:
-        """
-        Splits this cell into two children along its longest dimension.
-        
-        Args:
-            next_id: Starting ID for new cells
-            
-        Returns:
-            Tuple of two child cells
-        """
-        # Find dimension with largest extent
+        """Splits cell and stores parent reference."""
         dim = self.get_max_range_dim()
         mid = (self.bounds[dim, 0] + self.bounds[dim, 1]) / 2.0
         
-        # Create two children by bisecting along dim
         bounds1 = self.bounds.copy()
-        bounds1[dim, 1] = mid  # Left/lower child
-        
+        bounds1[dim, 1] = mid
         bounds2 = self.bounds.copy()
-        bounds2[dim, 0] = mid  # Right/upper child
+        bounds2[dim, 0] = mid
         
         child1 = Cell(bounds1, next_id)
         child2 = Cell(bounds2, next_id + 1)
         
-        # Update tree structure
+        # Store parent reference for value inheritance
+        child1.parent = self
+        child2.parent = self
+        
         self.children = [child1, child2]
         self.is_leaf = False
         
         return child1, child2
-    
+        
     def __repr__(self):
         return (f"Cell(id={self.cell_id}, center={self.center}, "
                 f"V_upper={self.V_upper}, V_lower={self.V_lower})")
@@ -563,152 +555,87 @@ class SafetyValueIterator:
     Computes upper and lower bounds on the safety value function:
     - V̄_γ(s): Upper bound on Vγ(x) for all x in cell s
     - V_γ(s): Lower bound on Vγ(x) for all x in cell s
-    
-    Uses the Bellman operator:
-    V̄_γ(s) = min{ l̄(s), max_u max_{s'∈Δ(s,u)} γ V̄_γ(s') }
-    V_γ(s) = min{ l(s), max_u min_{s'∈Δ(s,u)} γ V_γ(s') }
     """
     
-    def __init__(self,
-                 env: Environment,
-                 gamma: float,
-                 cell_tree: CellTree,
-                 reachability: ReachabilityAnalyzer,
-                 output_dir: Optional[str] = None):
+    def __init__(self, env: Environment, gamma: float, cell_tree: CellTree,
+                 reachability: ReachabilityAnalyzer, output_dir: Optional[str] = None):
         self.env = env
         self.gamma = gamma
         self.cell_tree = cell_tree
         self.reachability = reachability
-
+        
         # Default output dir depends on reachability type
         if output_dir is None:
             rname = type(reachability).__name__
             output_dir = f"./results/{rname}"
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
-
+        
         self.L_f, self.L_l = env.get_lipschitz_constants()
         if gamma * self.L_f >= 1:
             raise ValueError(f"Contraction condition violated: γL_f = {gamma * self.L_f} >= 1")
-
+        
+        # Track refinement phase for filename generation
+        self.refinement_phase = 0
+        
         print(f"Initialized with γ={gamma}, L_f={self.L_f}, L_l={self.L_l}")
-        print(f"Contraction factor: γL_f = {gamma * self.L_f}")
+        print(f"Contraction factor: γL_f = {gamma * self.L_f:.4f}")
     
     def initialize_cells(self):
-        """
-        Initializes stage cost bounds l(s) and l̄(s) for all cells.
-        
-        Uses Lipschitz continuity of l:
-        l(s) = l(x_c) - L_l * η
-        l̄(s) = l(x_c) + L_l * η
-        
-        where x_c is the cell center and η is the maximum deviation
-        from center in infinity norm.
-        """
+        """Initialize stage cost bounds l(s) and l̄(s) for all cells."""
         for cell in self.cell_tree.get_leaves():
-            # Evaluate l at center
             l_center = self.env.failure_function(cell.center)
-            
-            # Compute η = half the maximum cell width (infinity norm)
-            # For a hyperrectangle, this is half the longest side
             eta = 0.5 * cell.get_max_range()
-            
-            # Lipschitz bounds
             cell.l_lower = l_center - self.L_l * eta
             cell.l_upper = l_center + self.L_l * eta
-            
-            # Initialize value functions to ensure first update is correct
-            # Start with -∞ (no safety guarantee) and ∞ (no failure proven)
             cell.V_lower = -np.inf
             cell.V_upper = np.inf
     
     def initialize_new_cells(self, new_cells: List[Cell]):
-        """
-        Initializes only the newly created cells (used in Algorithm 2).
-        
-        Args:
-            new_cells: List of cells to initialize
-        """
+        """Initialize new cells, inheriting V values from parent if available."""
         for cell in new_cells:
             l_center = self.env.failure_function(cell.center)
             eta = 0.5 * cell.get_max_range()
             cell.l_lower = l_center - self.L_l * eta
             cell.l_upper = l_center + self.L_l * eta
-            cell.V_lower = -np.inf
-            cell.V_upper = np.inf
+            
+            # Inherit from parent if it exists and has values
+            if (hasattr(cell, 'parent') and cell.parent and 
+                cell.parent.V_upper is not None and cell.parent.V_lower is not None):
+                cell.V_lower = cell.parent.V_lower
+                cell.V_upper = cell.parent.V_upper
+            else:
+                cell.V_lower = -np.inf
+                cell.V_upper = np.inf
     
     def bellman_update(self, cell: Cell) -> Tuple[float, float]:
-        """
-        Performs one Bellman update for a cell.
-        
-        Computes:
-        V̄_γ(s) = min{ l̄(s), max_u max_{s'∈Δ(s,u)} γ V̄_γ(s') }
-        V_γ(s) = min{ l(s), max_u min_{s'∈Δ(s,u)} γ V_γ(s') }
-        
-        Args:
-            cell: Cell to update
-            
-        Returns:
-            (new_V_upper, new_V_lower)
-        """
+        """Single Bellman update for a cell."""
         max_upper = -np.inf
         max_lower = -np.inf
         
-        # Loop over all actions
         for action in self.env.get_action_space():
-            # Compute successor cells Δ(s, u)
-            successors = self.reachability.compute_successor_cells(
-                cell, action, self.cell_tree
-            )
-            
+            successors = self.reachability.compute_successor_cells(cell, action, self.cell_tree)
             if len(successors) == 0:
-                continue  # No reachable successors for this action
+                continue
             
-            # Upper bound: take maximum over successors
             upper_vals = [s.V_upper for s in successors if s.V_upper is not None]
             if upper_vals:
                 action_upper = self.gamma * max(upper_vals)
                 max_upper = max(max_upper, action_upper)
             
-            # Lower bound: take minimum over successors
             lower_vals = [s.V_lower for s in successors if s.V_lower is not None]
             if lower_vals:
                 action_lower = self.gamma * min(lower_vals)
                 max_lower = max(max_lower, action_lower)
         
-        # Apply min with stage cost (terminal condition)
         new_V_upper = min(cell.l_upper, max_upper) if max_upper > -np.inf else cell.l_upper
         new_V_lower = min(cell.l_lower, max_lower) if max_lower > -np.inf else cell.l_lower
-        
         return new_V_upper, new_V_lower
     
-    def value_iteration(
-        self, 
-        max_iterations: int = 1000,
-        convergence_tol: float = 1e-3,
-        plot_freq: int = 10
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Runs value iteration until convergence.
-        
-        Algorithm:
-        1. Initialize all cells with stage cost bounds
-        2. Repeat until convergence:
-           - For each cell, apply Bellman update
-           - Check ||V^k - V^{k-1}||_∞ < tolerance
-        3. Save plots periodically
-        
-        Args:
-            max_iterations: Maximum number of iterations
-            convergence_tol: Convergence tolerance for ||V^k - V^{k-1}||_∞
-            plot_freq: Frequency (in iterations) to save plots
-            
-        Returns:
-            (convergence_history_upper, convergence_history_lower)
-        """
-        # Initialize all cells
+    def value_iteration(self, max_iterations: int = 1000, convergence_tol: float = 1e-3,
+                       plot_freq: int = 10) -> Tuple[np.ndarray, np.ndarray]:
+        """Run value iteration until convergence."""
         self.initialize_cells()
-        
         conv_history_upper = []
         conv_history_lower = []
         
@@ -717,43 +644,32 @@ class SafetyValueIterator:
         print(f"Number of cells: {self.cell_tree.get_num_leaves()}")
         
         for iteration in range(max_iterations):
-            # Store previous values for convergence check
             prev_upper = {cell.cell_id: cell.V_upper for cell in self.cell_tree.get_leaves()}
             prev_lower = {cell.cell_id: cell.V_lower for cell in self.cell_tree.get_leaves()}
             
-            # Apply Bellman update to all cells (synchronous update)
             updates = {}
             for cell in self.cell_tree.get_leaves():
                 new_upper, new_lower = self.bellman_update(cell)
                 updates[cell.cell_id] = (new_upper, new_lower)
             
-            # Apply updates simultaneously
             for cell in self.cell_tree.get_leaves():
                 cell.V_upper, cell.V_lower = updates[cell.cell_id]
             
-            # Compute convergence metrics (infinity norm)
-            diff_upper = max(
-                abs(cell.V_upper - prev_upper[cell.cell_id])
-                for cell in self.cell_tree.get_leaves()
-            )
-            diff_lower = max(
-                abs(cell.V_lower - prev_lower[cell.cell_id])
-                for cell in self.cell_tree.get_leaves()
-            )
+            diff_upper = max(abs(cell.V_upper - prev_upper[cell.cell_id]) 
+                           for cell in self.cell_tree.get_leaves())
+            diff_lower = max(abs(cell.V_lower - prev_lower[cell.cell_id]) 
+                           for cell in self.cell_tree.get_leaves())
             
             conv_history_upper.append(diff_upper)
             conv_history_lower.append(diff_lower)
             
-            # Print progress
             print(f"Iteration {iteration + 1}: "
                   f"||V̄^k - V̄^{{k-1}}||_∞ = {diff_upper:.6f}, "
                   f"||V_^k - V_^{{k-1}}||_∞ = {diff_lower:.6f}")
             
-            # Save plot periodically
             if (iteration + 1) % plot_freq == 0:
                 self._save_plot(iteration + 1)
             
-            # Check convergence
             if diff_upper < convergence_tol and diff_lower < convergence_tol:
                 print(f"\n✓ Converged at iteration {iteration + 1}!")
                 self._save_plot(iteration + 1, final=True)
@@ -764,62 +680,35 @@ class SafetyValueIterator:
         
         return np.array(conv_history_upper), np.array(conv_history_lower)
     
-    def _continue_value_iteration(
-        self,
-        max_iterations: int,
-        convergence_tol: float = 1e-3,
-        plot_freq: int = 20
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Continues value iteration WITHOUT reinitializing cells.
-        Used in Algorithm 2 after adaptive refinement.
-        
-        This differs from value_iteration() by NOT calling initialize_cells(),
-        so existing V values are preserved.
-        
-        Args:
-            max_iterations: Maximum number of iterations
-            convergence_tol: Convergence tolerance
-            plot_freq: How often to save plots
-            
-        Returns:
-            (convergence_history_upper, convergence_history_lower)
-        """
+    def _continue_value_iteration(self, max_iterations: int, convergence_tol: float = 1e-3,
+                                  plot_freq: int = 10) -> Tuple[np.ndarray, np.ndarray]:
+        """Continue VI without reinitializing (for Algorithm 2)."""
         conv_history_upper = []
         conv_history_lower = []
         
-        print(f"Continuing value iteration (max {max_iterations} iterations)...")
-        print(f"Number of cells: {self.cell_tree.get_num_leaves()}")
+        print(f"  Continuing VI (max {max_iterations} iter, {self.cell_tree.get_num_leaves()} cells)...")
         
         for iteration in range(max_iterations):
-            # Store previous values
             prev_upper = {cell.cell_id: cell.V_upper for cell in self.cell_tree.get_leaves()}
             prev_lower = {cell.cell_id: cell.V_lower for cell in self.cell_tree.get_leaves()}
             
-            # Apply Bellman update
             updates = {}
             for cell in self.cell_tree.get_leaves():
                 new_upper, new_lower = self.bellman_update(cell)
                 updates[cell.cell_id] = (new_upper, new_lower)
             
-            # Apply updates
             for cell in self.cell_tree.get_leaves():
                 cell.V_upper, cell.V_lower = updates[cell.cell_id]
             
-            # Compute convergence
-            diff_upper = max(
-                abs(cell.V_upper - prev_upper[cell.cell_id])
-                for cell in self.cell_tree.get_leaves()
-            )
-            diff_lower = max(
-                abs(cell.V_lower - prev_lower[cell.cell_id])
-                for cell in self.cell_tree.get_leaves()
-            )
+            diff_upper = max(abs(cell.V_upper - prev_upper[cell.cell_id]) 
+                           for cell in self.cell_tree.get_leaves())
+            diff_lower = max(abs(cell.V_lower - prev_lower[cell.cell_id]) 
+                           for cell in self.cell_tree.get_leaves())
             
             conv_history_upper.append(diff_upper)
             conv_history_lower.append(diff_lower)
             
-            print(f"Iteration {iteration + 1}: "
+            print(f"    Iter {iteration + 1}: "
                   f"||V̄^k - V̄^{{k-1}}||_∞ = {diff_upper:.6f}, "
                   f"||V_^k - V_^{{k-1}}||_∞ = {diff_lower:.6f}")
             
@@ -827,18 +716,28 @@ class SafetyValueIterator:
                 self._save_plot(iteration + 1)
             
             if diff_upper < convergence_tol and diff_lower < convergence_tol:
-                print(f"Converged at iteration {iteration + 1}!")
+                print(f"    ✓ Converged at iteration {iteration + 1}!")
                 break
         
         return np.array(conv_history_upper), np.array(conv_history_lower)
     
     def _save_plot(self, iteration: int, final: bool = False):
-        """Saves visualization of current value function."""
+        """Save visualization with refinement phase in filename."""
         suffix = "_final" if final else ""
-        filename = os.path.join(self.output_dir, f"iteration_{iteration:04d}{suffix}.png")
+        
+        # Include refinement phase in filename
+        if self.refinement_phase > 0:
+            filename = os.path.join(
+                self.output_dir, 
+                f"iteration_{iteration:04d}_refinement_{self.refinement_phase:02d}{suffix}.png"
+            )
+        else:
+            filename = os.path.join(
+                self.output_dir, 
+                f"iteration_{iteration:04d}{suffix}.png"
+            )
+        
         plot_value_function(self.env, self.cell_tree, filename, iteration)
-        if final:
-            print(f"Final plot saved to {filename}")
 
 
 # ============================================================================
@@ -846,178 +745,209 @@ class SafetyValueIterator:
 # ============================================================================
 
 class AdaptiveRefinement:
-    """
-    Implements Algorithm 2/3: Adaptive refinement of boundary cells.
+    """Algorithm 2/3: Adaptive refinement with comprehensive logging."""
     
-    Strategy:
-    1. Start with coarse grid and run value iteration
-    2. Identify boundary cells (where V̄_γ > 0 and V_γ < 0)
-    3. Refine boundary cells by splitting
-    4. Reinitialize only new cells
-    5. Continue value iteration (without resetting existing cells)
-    6. Repeat until error tolerance met or max refinements reached
-    
-    This focuses computational effort on the safety boundary while
-    keeping safe and unsafe regions coarse.
-    """
-    
-    def __init__(
-        self,
-        env: Environment,
-        gamma: float,
-        cell_tree: CellTree,
-        reachability: ReachabilityAnalyzer,
-        output_dir: str = "./results_adaptive"
-    ):
-        """
-        Initialize adaptive refinement.
-        
-        Args:
-            env: Environment
-            gamma: Discount factor
-            cell_tree: Initial cell tree (typically coarse)
-            reachability: Reachability analyzer
-            output_dir: Output directory for results
-        """
+    def __init__(self, env: Environment, gamma: float, cell_tree: CellTree,
+                 reachability: ReachabilityAnalyzer, output_dir: str = None):
         self.env = env
         self.gamma = gamma
         self.cell_tree = cell_tree
         self.reachability = reachability
+        
+        if output_dir is None:
+            rname = type(reachability).__name__
+            output_dir = f"./results_adaptive/{rname}"
         self.output_dir = output_dir
         
-        # Create value iterator
-        self.value_iterator = SafetyValueIterator(
-            env, gamma, cell_tree, reachability, output_dir
-        )
-        
-        # Get Lipschitz constant for l
+        self.value_iterator = SafetyValueIterator(env, gamma, cell_tree, reachability, output_dir)
         self.L_l = env.get_lipschitz_constants()[1]
     
-    def refine(
-        self,
-        epsilon: float,
-        max_refinements: int = 100,
-        vi_iterations_per_refinement: int = 100
-    ):
-        """
-        Main adaptive refinement loop (Algorithm 2/3).
-        
-        Args:
-            epsilon: Error tolerance (discretization error bound)
-            max_refinements: Maximum number of refinement iterations
-            vi_iterations_per_refinement: VI iterations after each refinement
-        """
-        # Compute minimum cell size from error tolerance
-        # From theory: discretization error ≤ 2*L_l*η, so η_min = ε/(2*L_l)
+    def refine(self, epsilon: float, max_refinements: int = 100,
+               vi_iterations_per_refinement: int = 100):
+        """Main adaptive refinement loop with detailed queue tracking."""
         eta_min = epsilon / (2 * self.L_l)
-        print(f"\nAdaptive refinement with ε={epsilon}, η_min={eta_min:.4f}")
-        print(f"Cells smaller than η_min will not be refined further.")
         
-        # Initial value iteration on coarse grid
-        print("\n" + "="*70)
-        print("INITIAL VALUE ITERATION")
-        print("="*70)
+        print(f"\n{'='*70}")
+        print("ADAPTIVE REFINEMENT CONFIGURATION")
+        print(f"{'='*70}")
+        print(f"  Error tolerance ε: {epsilon}")
+        print(f"  Minimum cell size η_min: {eta_min:.6f}")
+        print(f"  Max refinements: {max_refinements}")
+        print(f"  VI iterations per refinement: {vi_iterations_per_refinement}")
+        
+        # Phase 0: Initial value iteration
+        print(f"\n{'='*70}")
+        print("PHASE 0: INITIAL VALUE ITERATION")
+        print(f"{'='*70}")
+        print(f"Grid: {self.cell_tree.get_num_leaves()} cells")
+        
+        self.value_iterator.refinement_phase = 0
         self.value_iterator.value_iteration(
             max_iterations=vi_iterations_per_refinement,
-            plot_freq=20
+            plot_freq=10
         )
         
-        # Adaptive refinement loop
+        # Plot initial l bounds
+        plot_failure_function_bounds(
+            self.env, self.cell_tree,
+            filename_prefix="ell_bounds_phase_0",
+            save_dir=self.output_dir
+        )
+        
+        # Initial queue state
+        boundary_cells = self._identify_boundary_cells()
+        refinable = [c for c in boundary_cells if c.get_max_range() > eta_min]
+        
+        print(f"\n{'='*70}")
+        print("INITIAL QUEUE STATE")
+        print(f"{'='*70}")
+        print(f"Boundary cells in queue: {len(boundary_cells)}")
+        print(f"  Refinable (>η_min): {len(refinable)}")
+        print(f"  Below threshold: {len(boundary_cells) - len(refinable)}")
+        
+        # Refinement loop
         refinement_iter = 0
+        total_refined = 0
+        
         while refinement_iter < max_refinements:
-            # Identify cells on the boundary
             boundary_cells = self._identify_boundary_cells()
+            refinable = [c for c in boundary_cells if c.get_max_range() > eta_min]
+            too_small = [c for c in boundary_cells if c.get_max_range() <= eta_min]
             
-            print(f"\n" + "="*70)
-            print(f"REFINEMENT ITERATION {refinement_iter + 1}")
-            print("="*70)
-            print(f"Boundary cells: {len(boundary_cells)}")
+            print(f"\n{'='*70}")
+            print(f"PHASE {refinement_iter + 1}: REFINEMENT")
+            print(f"{'='*70}")
+            print(f"Queue size: {len(boundary_cells)} boundary cells")
+            print(f"  Refinable (>η_min): {len(refinable)}")
+            print(f"  Below threshold (<η_min): {len(too_small)}")
             
-            if len(boundary_cells) == 0:
-                print("No boundary cells remaining - all cells classified!")
+            if len(refinable) == 0:
+                print(f"\n✓ STOPPING: All {len(too_small)} boundary cells below η_min")
                 break
             
-            # Refine boundary cells that are still too large
-            refined_any = False
+            # Cell size statistics
+            if refinable:
+                sizes = [c.get_max_range() for c in refinable]
+                print(f"\nRefinable cell size statistics:")
+                print(f"  Max: {max(sizes):.6f}")
+                print(f"  Mean: {np.mean(sizes):.6f}")
+                print(f"  Min: {min(sizes):.6f}")
+                print(f"  Threshold η_min: {eta_min:.6f}")
+            
+            # Perform refinement
+            print(f"\nRefining {len(refinable)} cells...")
             new_cells = []
+            for cell in refinable:
+                self.cell_tree.refine_cell(cell)
+                new_cells.extend(cell.children)
             
-            for cell in boundary_cells:
-                max_range = cell.get_max_range()
-                if max_range > eta_min:
-                    # Split this cell
-                    self.cell_tree.refine_cell(cell)
-                    # Track the newly created children
-                    new_cells.extend(cell.children)
-                    refined_any = True
+            total_refined += len(refinable)
+            print(f"  Refined: {len(refinable)} parent cells")
+            print(f"  Created: {len(new_cells)} child cells")
+            print(f"  Total cells now: {self.cell_tree.get_num_leaves()}")
+            print(f"  Cumulative refined: {total_refined}")
             
-            if not refined_any:
-                print("All boundary cells below minimum resolution η_min!")
-                break
-            
-            print(f"Refined {len(new_cells)//2} cells into {len(new_cells)} new cells")
-            print(f"Total cells: {self.cell_tree.get_num_leaves()}")
-            
-            # Initialize only the new cells (CRITICAL: don't reset existing cells)
+            # Initialize new cells with parent value inheritance
             if new_cells:
-                print(f"Initializing {len(new_cells)} new cells...")
+                print(f"\nInitializing {len(new_cells)} new cells...")
                 self.value_iterator.initialize_new_cells(new_cells)
+                
+                inherited = sum(1 for c in new_cells 
+                              if c.V_upper != np.inf and c.V_lower != -np.inf)
+                print(f"  Inherited parent values: {inherited}/{len(new_cells)} cells")
+                
+                # Plot l bounds after refinement
+                plot_failure_function_bounds(
+                    self.env, self.cell_tree,
+                    filename_prefix=f"ell_bounds_phase_{refinement_iter + 1}",
+                    save_dir=self.output_dir
+                )
             
-            # Continue value iteration WITHOUT reinitializing existing cells
-            print(f"\nContinuing value iteration...")
-            self.value_iterator._continue_value_iteration(
+            # Set refinement phase BEFORE continuing VI
+            self.value_iterator.refinement_phase = refinement_iter + 1
+            
+            # Continue value iteration
+            print(f"\nValue Iteration (Phase {refinement_iter + 1}):")
+            print(f"  Grid: {self.cell_tree.get_num_leaves()} cells")
+            
+            conv_upper, conv_lower = self.value_iterator._continue_value_iteration(
                 max_iterations=vi_iterations_per_refinement,
-                plot_freq=20
+                plot_freq=10,
+                convergence_tol=1e-3
             )
+            
+            # Post-VI queue state
+            new_boundary = self._identify_boundary_cells()
+            new_refinable = [c for c in new_boundary if c.get_max_range() > eta_min]
+            
+            print(f"\n  Post-VI Queue State:")
+            print(f"    Total boundary: {len(new_boundary)}")
+            print(f"    Refinable: {len(new_refinable)}")
+            print(f"    Change: {len(new_boundary) - len(boundary_cells):+d} boundary cells")
             
             refinement_iter += 1
         
-        # Final statistics
-        print(f"\n" + "="*70)
-        print("REFINEMENT COMPLETE")
-        print("="*70)
-        print(f"Total refinement iterations: {refinement_iter}")
-        print(f"Final number of cells: {self.cell_tree.get_num_leaves()}")
+        # Final summary
+        print(f"\n{'='*70}")
+        print("ADAPTIVE REFINEMENT COMPLETE")
+        print(f"{'='*70}")
+        print(f"\nRefinement Summary:")
+        print(f"  Phases completed: {refinement_iter}")
+        print(f"  Parent cells refined: {total_refined}")
+        print(f"  Child cells created: {total_refined * 2}")
+        print(f"  Final cells: {self.cell_tree.get_num_leaves()}")
+        
+        # Final queue state
+        final_boundary = self._identify_boundary_cells()
+        final_refinable = [c for c in final_boundary if c.get_max_range() > eta_min]
+        
+        print(f"\nFinal Queue State:")
+        print(f"  Boundary cells: {len(final_boundary)}")
+        print(f"  Refinable: {len(final_refinable)}")
+        print(f"  Below threshold: {len(final_boundary) - len(final_refinable)}")
+        
         self._print_statistics()
+        
+        # Final plots
+        plot_failure_function_bounds(
+            self.env, self.cell_tree,
+            filename_prefix="ell_bounds_FINAL",
+            save_dir=self.output_dir
+        )
+        
+        # Save final value function
+        self.value_iterator.refinement_phase = refinement_iter
+        filename = os.path.join(self.output_dir, "value_function_FINAL.png")
+        plot_value_function(self.env, self.cell_tree, filename, 9999)
+        
+        print(f"\n✓ All results saved to: {self.output_dir}/")
     
     def _identify_boundary_cells(self) -> List[Cell]:
-        """
-        Identifies boundary cells where V̄_γ(s) > 0 and V_γ(s) < 0.
-        
-        These cells intersect both safe and unsafe regions and need refinement.
-        
-        Returns:
-            List of boundary cells
-        """
+        """Identify boundary cells where V̄_γ(s) > 0 and V_γ(s) < 0."""
         boundary = []
         for cell in self.cell_tree.get_leaves():
             if cell.V_upper is not None and cell.V_lower is not None:
-                # Boundary: upper bound positive, lower bound negative
                 if cell.V_upper > 0 and cell.V_lower < 0:
                     boundary.append(cell)
         return boundary
     
     def _print_statistics(self):
-        """Prints final statistics about safe/unsafe/boundary regions."""
-        safe_cells = 0
-        unsafe_cells = 0
-        boundary_cells = 0
-        
+        """Print final cell classification statistics."""
+        safe = unsafe = boundary = 0
         for cell in self.cell_tree.get_leaves():
             if cell.V_lower is not None and cell.V_upper is not None:
                 if cell.V_lower > 0:
-                    safe_cells += 1  # Definitely safe
+                    safe += 1
                 elif cell.V_upper < 0:
-                    unsafe_cells += 1  # Definitely unsafe
+                    unsafe += 1
                 else:
-                    boundary_cells += 1  # Boundary (ambiguous)
+                    boundary += 1
         
         total = self.cell_tree.get_num_leaves()
-        print(f"\nCell Classification:")
-        print(f"  Safe cells:     {safe_cells:5d} ({100*safe_cells/total:5.1f}%)")
-        print(f"  Unsafe cells:   {unsafe_cells:5d} ({100*unsafe_cells/total:5.1f}%)")
-        print(f"  Boundary cells: {boundary_cells:5d} ({100*boundary_cells/total:5.1f}%)")
-
-
+        print(f"\nFinal Cell Classification:")
+        print(f"  Safe:     {safe:6d} ({100*safe/total:5.1f}%)")
+        print(f"  Unsafe:   {unsafe:6d} ({100*unsafe/total:5.1f}%)")
+        print(f"  Boundary: {boundary:6d} ({100*boundary/total:5.1f}%)")
 # ============================================================================
 # PART 6: VISUALIZATION
 # ============================================================================
@@ -1610,13 +1540,17 @@ def run_algorithm_2(args):
         reachability = ReachabilityAnalyzer(env, samples_per_dim=args.samples)
         print(f"  Using sampling-based reachability")
     
+    # FIXED: Use automatic directory naming based on reachability type
+    rname = type(reachability).__name__
+    output_dir = f"./results_adaptive/{rname}"
+    
     # Create adaptive refinement
     adaptive = AdaptiveRefinement(
         env=env,
         gamma=args.gamma,
         cell_tree=cell_tree,
         reachability=reachability,
-        output_dir=args.output_dir
+        output_dir=output_dir  # ← FIXED
     )
     
     # Run adaptive refinement
@@ -1633,8 +1567,7 @@ def run_algorithm_2(args):
     print("ALGORITHM 2 COMPLETE")
     print("="*70)
     print(f"Total computation time: {elapsed:.2f} seconds")
-    print(f"\nAll results saved to: {args.output_dir}/")
-
+    print(f"\nAll results saved to: {output_dir}/")  # ← FIXED
 
 def main():
     """Main entry point with command-line argument parsing."""
@@ -1678,6 +1611,8 @@ def main():
                        help="Maximum refinement iterations (Algorithm 2)")
     parser.add_argument('--vi-iterations', type=int, default=100,
                        help="VI iterations per refinement (Algorithm 2)")
+    
+    ###imp note that --initial-resolution and --resolution are used for alg2 and alg1 respectively
     
     # Reachability parameters
     parser.add_argument('--samples', type=int, default=10,
