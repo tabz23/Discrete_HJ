@@ -899,3 +899,6 @@ if __name__ == "__main__":
 #  θ = π (180) ←----o----→  θ = 0
 #              |
 #              ↓ θ = -π/2 (-90)
+
+#python safety_value_function.py --algorithm 1 --resolution 8 --iterations 100 --lipschitz-reach
+#python safety_value_function.py --algorithm 1 --resolution 8 --iterations 100 
