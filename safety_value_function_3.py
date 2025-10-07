@@ -242,7 +242,7 @@ class ReachabilityAnalyzer:
     def __init__(self, env: Environment, samples_per_dim: int = 5):
         self.env = env
         self.samples_per_dim = samples_per_dim
-    
+        
     def compute_reachable_set(self, cell: Cell, action) -> np.ndarray:
         samples = self._sample_cell(cell)
         next_states = []
@@ -255,8 +255,46 @@ class ReachabilityAnalyzer:
         reach_bounds[:, 0] = np.min(next_states, axis=0)
         reach_bounds[:, 1] = np.max(next_states, axis=0)
         
+        # Check for theta issues
+        theta_min = reach_bounds[2, 0]
+        theta_max = reach_bounds[2, 1]
+        theta_span = theta_max - theta_min
+        
+        # Warning 1: Theta values outside [-π, π]
+        if abs(theta_min) > np.pi + 0.01 or abs(theta_max) > np.pi + 0.01:
+            print(f"⚠️  WARNING: Theta bounds outside [-π, π]!")
+            print(f"   Cell center: {cell.center}")
+            print(f"   Action: {action}")
+            print(f"   Theta bounds: [{theta_min:.3f}, {theta_max:.3f}]")
+        
+        # Warning 2: Theta span larger than expected (indicates wraparound issue)
+        # For Dubins car with dt=0.1 and max angular velocity |ω|=1.0:
+        # Maximum theta change = 1.0 * 0.1 = 0.1 rad
+        # Plus cell size uncertainty, reasonable span should be < 1.0 rad
+        max_expected_span = 1.0  # Adjust based on your system
+        
+        if theta_span > max_expected_span:
+            theta_vals = next_states[:, 2]
+            theta_sorted = np.sort(theta_vals)
+            
+            # Check for discontinuity (large gap indicating wraparound)
+            gaps = np.diff(theta_sorted)
+            max_gap = np.max(gaps) if len(gaps) > 0 else 0
+            
+            if max_gap > np.pi:
+                print(f"⚠️  WARNING: Theta wraparound detected!")
+                print(f"   Cell center: {cell.center}")
+                print(f"   Cell theta bounds: [{cell.bounds[2, 0]:.3f}, {cell.bounds[2, 1]:.3f}]")
+                print(f"   Action: {action}")
+                print(f"   Computed theta bounds: [{theta_min:.3f}, {theta_max:.3f}]")
+                print(f"   Theta span: {theta_span:.3f} rad (expected < {max_expected_span:.3f})")
+                print(f"   Max gap in sorted samples: {max_gap:.3f} rad")
+                print(f"   Sample theta values (first 5): {theta_vals[:5]}")
+                print(f"   Sample theta values (sorted): {theta_sorted[[0, 1, -2, -1]]}")
+                print(f"   This causes massive over-approximation of reachable set!")
+        
         return reach_bounds
-    
+        
     def compute_successor_cells(self, cell: Cell, action, cell_tree: CellTree) -> List[Cell]:
         reach_bounds = self.compute_reachable_set(cell, action)
         successors = []
@@ -359,7 +397,7 @@ class SafetyValueIterator:
     
     def bellman_update(self, cell: Cell) -> Tuple[float, float]:
         """Single Bellman update for a cell."""
-        max_upper = -np.inf
+        max_upper = -np.inf###CHECK THIS
         max_lower = -np.inf
         
         for action in self.env.get_action_space():
@@ -1005,7 +1043,6 @@ def plot_convergence(
     plt.close()
     print(f"Convergence plot saved to {filename}")
 
-
 def plot_reachability_single_cell(
     env,
     cell_tree,
@@ -1125,6 +1162,186 @@ def plot_reachability_single_cell(
     print(f"Saved reachability plot to {filename}")
 
 
+def plot_reachability_multiple_cells(
+    env,
+    cell_tree,
+    reachability,
+    num_cells=5,
+    cell_indices=None,
+    n_samples=10,
+    save_dir="./results",
+    filename_prefix="reachability"
+):
+    """
+    Visualizes reachable cells from multiple source cells.
+    
+    Args:
+        num_cells: Number of random cells to plot (ignored if cell_indices provided)
+        cell_indices: Specific list of cell indices to plot. If None, randomly sample.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    
+    leaves = cell_tree.get_leaves()
+    n_cells = len(leaves)
+    
+    # Determine which cells to plot
+    if cell_indices is None:
+        # Sample random cells (avoid duplicates)
+        rng = np.random.default_rng(42)
+        cell_indices = rng.choice(n_cells, size=min(num_cells, n_cells), replace=False)
+    
+    print(f"\nGenerating reachability plots for {len(cell_indices)} cells...")
+    
+    # Plot each cell
+    for idx in cell_indices:
+        plot_reachability_single_cell(
+            env=env,
+            cell_tree=cell_tree,
+            reachability=reachability,
+            cell_idx=int(idx),
+            n_samples=n_samples,
+            save_dir=save_dir,
+            filename_prefix=filename_prefix
+        )
+
+
+def plot_reachability_grid(
+    env,
+    cell_tree,
+    reachability,
+    grid_size=(2, 3),
+    cell_indices=None,
+    n_samples=10,
+    figsize=(15, 10),
+    save_dir="./results",
+    filename="reachability_grid.png"
+):
+    """
+    Visualizes reachable cells from multiple source cells in a single figure grid.
+    
+    Args:
+        grid_size: Tuple (rows, cols) for subplot layout
+        cell_indices: List of cell indices to plot. If None, sample randomly.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    
+    leaves = cell_tree.get_leaves()
+    n_cells = len(leaves)
+    num_plots = grid_size[0] * grid_size[1]
+    
+    # Determine which cells to plot
+    if cell_indices is None:
+        rng = np.random.default_rng(42)
+        cell_indices = rng.choice(n_cells, size=min(num_plots, n_cells), replace=False)
+    
+    cell_indices = cell_indices[:num_plots]  # Trim to fit grid
+    
+    fig, axes = plt.subplots(grid_size[0], grid_size[1], figsize=figsize)
+    axes = axes.flatten() if num_plots > 1 else [axes]
+    
+    action_colors = {-1.0: 'blue', 0.0: 'green', 1.0: 'orange'}
+    offset_angles = {-1.0: -8*np.pi/180, 0.0: 0.0, 1.0: 8*np.pi/180}
+    bounds = env.get_state_bounds()
+    
+    print(f"\nGenerating grid reachability plot for {len(cell_indices)} cells...")
+    
+    for plot_idx, cell_idx in enumerate(cell_indices):
+        ax = axes[plot_idx]
+        src_cell = leaves[cell_idx]
+        src_center = src_cell.center[:2]
+        theta_center = src_cell.center[2]
+        
+        ax.set_xlim(bounds[0])
+        ax.set_ylim(bounds[1])
+        ax.set_aspect('equal')
+        ax.grid(True, alpha=0.2)
+        ax.set_title(
+            f"Cell #{cell_idx} (θ={np.degrees(theta_center):.0f}°)",
+            fontsize=10
+        )
+        
+        # Draw all cells
+        for cell in leaves:
+            rect = Rectangle(
+                (cell.bounds[0, 0], cell.bounds[1, 0]),
+                cell.get_range(0),
+                cell.get_range(1),
+                fill=False,
+                edgecolor='gray',
+                linewidth=0.3,
+                alpha=0.2
+            )
+            ax.add_patch(rect)
+        
+        # Highlight source cell
+        rect_src = Rectangle(
+            (src_cell.bounds[0, 0], src_cell.bounds[1, 0]),
+            src_cell.get_range(0),
+            src_cell.get_range(1),
+            fill=False,
+            edgecolor='black',
+            linewidth=1.5
+        )
+        ax.add_patch(rect_src)
+        ax.plot(*src_center, 'ko', markersize=4)
+        
+        # Draw reachability arrows
+        for action in env.get_action_space():
+            succ_cells = reachability.compute_successor_cells(src_cell, action, cell_tree)
+            color = action_colors[action]
+            offset_angle = offset_angles[action]
+            
+            for dst_cell in succ_cells:
+                dst_center = dst_cell.center[:2]
+                dx = dst_center[0] - src_center[0]
+                dy = dst_center[1] - src_center[1]
+                
+                if offset_angle != 0.0:
+                    rot = np.array([
+                        [np.cos(offset_angle), -np.sin(offset_angle)],
+                        [np.sin(offset_angle), np.cos(offset_angle)]
+                    ])
+                    dx, dy = rot @ np.array([dx, dy])
+                
+                ax.arrow(src_center[0], src_center[1], dx, dy,
+                        color=color, alpha=0.5, linewidth=1.5,
+                        head_width=0.08, length_includes_head=True)
+        
+        # Draw obstacle
+        if isinstance(env, DubinsCarEnvironment):
+            obstacle = Circle(
+                env.obstacle_position,
+                env.obstacle_radius,
+                color='red',
+                alpha=0.4,
+                zorder=4
+            )
+            ax.add_patch(obstacle)
+        
+        ax.set_xlabel('x', fontsize=8)
+        ax.set_ylabel('y', fontsize=8)
+        ax.tick_params(labelsize=7)
+    
+    # Hide unused subplots
+    for idx in range(len(cell_indices), len(axes)):
+        axes[idx].axis('off')
+    
+    # Add global legend
+    legend_elements = [
+        plt.Line2D([0], [0], color='blue', linewidth=2, label='Action -1'),
+        plt.Line2D([0], [0], color='green', linewidth=2, label='Action 0'),
+        plt.Line2D([0], [0], color='orange', linewidth=2, label='Action +1')
+    ]
+    fig.legend(handles=legend_elements, loc='upper center', 
+               bbox_to_anchor=(0.5, 0.98), ncol=3, fontsize=10)
+    
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    
+    filepath = os.path.join(save_dir, filename)
+    plt.savefig(filepath, dpi=200, bbox_inches="tight")
+    plt.close()
+    
+    print(f"Saved grid reachability plot to {filepath}")
 def plot_failure_function_bounds(
     env,
     cell_tree,
@@ -1415,11 +1632,39 @@ def run_algorithm_1(args):
     )
     
     if args.plot_reachability:
-        print("\nGenerating reachability visualization...")
-        plot_reachability_single_cell(
-            env, cell_tree, reachability, 
-            cell_idx=45, 
+        print("\nGenerating reachability visualizations...")
+        
+        # Option 1: Plot multiple cells as separate files
+        plot_reachability_multiple_cells(
+            env, cell_tree, reachability,
+            num_cells=5,  # Plot 5 random cells
             save_dir=value_iter.output_dir
+        )
+        
+        # Option 2: Plot multiple cells in a single grid figure
+        plot_reachability_grid(
+            env, cell_tree, reachability,
+            grid_size=(2, 3),  # 2 rows, 3 columns = 6 cells
+            save_dir=value_iter.output_dir
+        )
+        
+        # Option 3: Plot specific cells (e.g., near obstacle, far from obstacle, etc.)
+        leaves = cell_tree.get_leaves()
+        
+        # Select interesting cells: near obstacle, middle, corners
+        interesting_indices = [
+            len(leaves) // 4,      # Quarter through
+            len(leaves) // 2,      # Middle
+            3 * len(leaves) // 4,  # Three quarters
+            0,                     # First cell
+            len(leaves) - 1        # Last cell
+        ]
+        
+        plot_reachability_multiple_cells(
+            env, cell_tree, reachability,
+            cell_indices=interesting_indices,
+            save_dir=value_iter.output_dir,
+            filename_prefix="reachability_interesting"
         )
     
     if args.plot_failure:
