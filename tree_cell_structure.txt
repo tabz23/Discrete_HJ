@@ -1,0 +1,63 @@
+"""
+======================================================================
+CELL TREE STRUCTURE OVERVIEW
+======================================================================
+
+Purpose:
+--------
+The CellTree maintains a hierarchical spatial partition of the
+continuous state space (e.g., (x, y, θ)) for reachability analysis
+and adaptive refinement.
+
+Key Concepts:
+--------------
+1. Each Cell represents a hyperrectangular region:
+       bounds = [[x_min, x_max],
+                 [y_min, y_max],
+                 [θ_min, θ_max]]
+
+2. The tree starts as a uniform grid of leaf cells (no hierarchy).
+   Each leaf initially covers one uniform subregion of the domain.
+
+3. During adaptive refinement:
+   - A leaf cell is selected for splitting.
+   - It is divided along the largest range dimension (1D binary split).
+   - Two new child cells are created and linked to the parent.
+   - The parent is marked as internal (is_leaf=False).
+   - The parent is removed from 'leaves', and its children are added.
+
+4. The CellTree always maintains:
+   - self.leaves:     list of all current leaf cells (finest resolution)
+   - self.all_cells:  list of all cells ever created (for bookkeeping)
+   - self.next_id:    counter for assigning unique IDs to new cells
+
+5. Parent–Child Links:
+   - child.parent = parent
+   - parent.children = [child1, child2]
+   - leaf cells have children = [] and is_leaf=True
+
+6. Traversal:
+   - get_cell_containing_point(point): searches only 'leaves'
+       → finds the most granular cell containing a given state
+   - parent links allow backtracking to coarser levels if needed
+
+7. Interpretation:
+   - 'leaves' define the current non-overlapping discretization
+     used for value iteration, reachability, and plotting.
+   - Internal nodes serve only as containers for refined regions.
+
+Example Refinement:
+-------------------
+Before:
+    Cell #42 (leaf)
+
+After split:
+    Cell #42 (internal)
+        ├─ Cell #120 (leaf)
+        └─ Cell #121 (leaf)
+
+Result:
+    leaves = [..., #120, #121, ...]
+    all_cells = [..., #42, #120, #121, ...]
+======================================================================
+"""

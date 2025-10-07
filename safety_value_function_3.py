@@ -349,13 +349,13 @@ class SafetyValueIterator:
             cell.l_lower = l_center - self.L_l * eta
             cell.l_upper = l_center + self.L_l * eta
             
-            if (hasattr(cell, 'parent') and cell.parent and 
-                cell.parent.V_upper is not None and cell.parent.V_lower is not None):
-                cell.V_lower = cell.parent.V_lower
-                cell.V_upper = cell.parent.V_upper
-            else:
-                cell.V_lower = -np.inf
-                cell.V_upper = np.inf
+            # if (hasattr(cell, 'parent') and cell.parent and 
+            #     cell.parent.V_upper is not None and cell.parent.V_lower is not None):
+            #     cell.V_lower = cell.parent.V_lower
+            #     cell.V_upper = cell.parent.V_upper
+            # else:
+            cell.V_lower = -np.inf
+            cell.V_upper = np.inf
     
     def bellman_update(self, cell: Cell) -> Tuple[float, float]:
         """Single Bellman update for a cell."""
@@ -446,14 +446,15 @@ class SafetyValueIterator:
         # Find all cells that can reach updated cells
         affected = set(updated_cells)
         
-        for cell in self.cell_tree.get_leaves():
-            if cell in affected:
-                continue
-            for action in self.env.get_action_space():
-                successors = self.reachability.compute_successor_cells(cell, action, self.cell_tree)
-                if any(s in affected for s in successors):
-                    affected.add(cell)
-                    break
+        ###ASK IF KEEP OR REMOVE THIS ASK IF KEEP OR REMOVE THIS ASK IF KEEP OR REMOVE THIS 
+        # for cell in self.cell_tree.get_leaves():
+        #     if cell in affected:
+        #         continue
+        #     for action in self.env.get_action_space():
+        #         successors = self.reachability.compute_successor_cells(cell, action, self.cell_tree)
+        #         if any(s in affected for s in successors):
+        #             affected.add(cell) ##CHECK IF KEEP OR NO
+        #             break
         
         print(f"  Local VI: {len(affected)} affected cells (out of {self.cell_tree.get_num_leaves()} total)")
         
@@ -623,7 +624,7 @@ class AdaptiveRefinement:
             print(f"  Total cells now: {self.cell_tree.get_num_leaves()}")
             print(f"  Cumulative refined: {total_refined}")
             
-            # Initialize new cells with parent value inheritance
+            # Initialize new cells with parent value inheritance or with inf / -inf
             if new_cells:
                 print(f"\nInitializing {len(new_cells)} new cells...")
                 self.value_iterator.initialize_new_cells(new_cells)
@@ -638,6 +639,8 @@ class AdaptiveRefinement:
                     filename_prefix=f"ell_bounds_phase_{refinement_iter + 1}",
                     save_dir=self.output_dir
                 )
+                
+                
             
             # Set refinement phase BEFORE LOCAL VI
             self.value_iterator.refinement_phase = refinement_iter + 1
@@ -648,20 +651,24 @@ class AdaptiveRefinement:
             conv_upper, conv_lower = self.value_iterator.local_value_iteration(
                 updated_cells=set(new_cells),
                 max_iterations=vi_iterations_per_refinement,
-                convergence_tol=1e-3
+                convergence_tol=self.args.tolerance
             )
+            # plot_value_function(self.env, self.cell_tree, filename, refinement_iter + 1)
             
             # Save plot AFTER local VI completes
             filename = os.path.join(
                 self.output_dir, 
                 f"value_function_phase_{refinement_iter + 1}_complete.png"
             )
-            plot_value_function(self.env, self.cell_tree, filename, refinement_iter + 1)
+            plot_value_function(self.env, self.cell_tree, filename, refinement_iter + 1)#moved up next to plot ell_bounds
             
             # Post-VI queue state
-            new_boundary = self._identify_boundary_cells()
-            new_refinable = [c for c in new_boundary if c.get_max_range() > eta_min]
+            # new_boundary = self._identify_boundary_cells()
+            # new_refinable = [c for c in new_boundary if c.get_max_range() > eta_min]
             
+            new_boundary = self._identify_boundary_cells()
+            new_refinable = [c for c in boundary_cells if c.get_max_range() > eta_min]
+            too_small = [c for c in boundary_cells if c.get_max_range() <= eta_min]
             print(f"\n  Post-VI Queue State:")
             print(f"    Total boundary: {len(new_boundary)}")
             print(f"    Refinable: {len(new_refinable)}")
@@ -698,7 +705,7 @@ class AdaptiveRefinement:
         )
         
         filename = os.path.join(self.output_dir, "value_function_FINAL.png")
-        plot_value_function(self.env, self.cell_tree, filename, 9999)
+        # plot_value_function(self.env, self.cell_tree, filename, 9999)
         
         print(f"\n✓ All results saved to: {self.output_dir}/")
     
@@ -793,7 +800,7 @@ def _plot_slice(
     y_min, y_max = bounds[1]
     
     # Create dense grid for smooth visualization
-    resolution = 100
+    resolution = 80
     x_grid = np.linspace(x_min, x_max, resolution)
     y_grid = np.linspace(y_min, y_max, resolution)
     X, Y = np.meshgrid(x_grid, y_grid)
@@ -817,8 +824,26 @@ def _plot_slice(
     # Draw zero level set (safety boundary)
     ax.contour(X, Y, V, levels=[0.0], colors='black', linewidths=2.5)
     
-    # Draw cell boundaries (only leaf cells)
+    # # Draw cell boundaries (only leaf cells)
+    # for cell in cell_tree.get_leaves():
+    #     a_x, b_x = cell.bounds[0]
+    #     a_y, b_y = cell.bounds[1]
+    #     rect = Rectangle(
+    #         (a_x, a_y),
+    #         b_x - a_x,
+    #         b_y - a_y,
+    #         fill=False,
+    #         edgecolor='black',
+    #         linewidth=0.5,
+    #         alpha=0.8
+    #     )
+    #     ax.add_patch(rect)
+    # Draw only cells whose θ-range includes this slice
     for cell in cell_tree.get_leaves():
+        theta_min, theta_max = cell.bounds[2]
+        if not (theta_min <= theta <= theta_max):
+            continue  # skip cells outside current θ slice
+        
         a_x, b_x = cell.bounds[0]
         a_y, b_y = cell.bounds[1]
         rect = Rectangle(
@@ -831,7 +856,7 @@ def _plot_slice(
             alpha=0.8
         )
         ax.add_patch(rect)
-    
+
     # Draw obstacle
     if isinstance(env, DubinsCarEnvironment):
         obstacle = Circle(
@@ -874,7 +899,7 @@ def _plot_classification_slice(
     C_BOUND = "#7f7f7f"   # Gray
     
     # Create classification grid
-    resolution = 200
+    resolution = 80
     x_grid = np.linspace(x_min, x_max, resolution)
     y_grid = np.linspace(y_min, y_max, resolution)
     
@@ -884,7 +909,7 @@ def _plot_classification_slice(
     for i in range(resolution):
         for j in range(resolution):
             state = np.array([x_grid[j], y_grid[i], theta])
-            cell = cell_tree.get_cell_containing_point(state)  # Tree traversal!
+            cell = cell_tree.get_cell_containing_point(state)  # leef traversal!
             
             if cell is not None and cell.V_upper is not None and cell.V_lower is not None:
                 if cell.V_lower > 0 and cell.V_upper > 0:
@@ -909,9 +934,13 @@ def _plot_classification_slice(
         aspect='auto',
         alpha=0.9
     )
-    
-    # Draw cell boundaries
+    # Draw cell boundaries only for cells containing this θ slice
     for cell in cell_tree.get_leaves():
+        theta_min, theta_max = cell.bounds[2]
+        if not (theta_min <= theta <= theta_max):
+            
+            continue  # skip irrelevant θ intervals
+        
         rect = Rectangle(
             (cell.bounds[0, 0], cell.bounds[1, 0]),
             cell.get_range(0),
@@ -922,6 +951,7 @@ def _plot_classification_slice(
             alpha=0.8
         )
         ax.add_patch(rect)
+
     
     # Draw obstacle
     if isinstance(env, DubinsCarEnvironment):
@@ -1175,7 +1205,174 @@ def plot_failure_function_bounds(
     plt.close()
     print(f"Saved ℓ-bounds plot to {filename}")
 
+# Add this to PART 6: VISUALIZATION section, after the other plotting functions
 
+def compute_ground_truth_reachability(
+    env: Environment,
+    time_horizon: int = 100,
+    resolution: int = 20
+):
+    """
+    Compute ground truth safe set by forward simulation with a hand-designed controller.
+    
+    Simply samples (x, y, theta) on a grid, simulates forward with safe controller,
+    and checks if trajectory hits the failure set.
+    """
+    print(f"\n{'='*70}")
+    print("COMPUTING GROUND TRUTH REACHABILITY")
+    print(f"{'='*70}")
+    print(f"Time horizon: {time_horizon} steps")
+    
+    # Only compute for theta slices we'll actually plot
+    theta_slices = [0, np.pi/4, np.pi/2]
+    print(f"Grid resolution: {resolution}^2 x {len(theta_slices)} slices = {resolution**2 * len(theta_slices)} states")
+    
+    def safe_controller(state: np.ndarray, env: DubinsCarEnvironment) -> float:
+        """
+        Hand-designed safe controller: actively avoid obstacle.
+        """
+        pos = state[:2]
+        theta = state[2]
+        
+        # SAFE MODE: Move away from obstacle
+        away_from_obstacle = pos - env.obstacle_position
+        desired_heading = np.arctan2(away_from_obstacle[1], away_from_obstacle[0])
+        
+        angle_diff = np.arctan2(
+            np.sin(desired_heading - theta),
+            np.cos(desired_heading - theta)
+        )
+        
+        actions = env.get_action_space()
+        if angle_diff > 0:
+            return actions[-1]  # Turn left
+        elif angle_diff < 0:
+            return actions[0]   # Turn right
+        else:
+            return actions[1]   # Go straight
+
+    def simulate_trajectory(initial_state: np.ndarray, time_horizon: int) -> bool:
+        """
+        Simulate trajectory with safe controller.
+        Returns True if safe (never enters failure set), False otherwise.
+        """
+        state = initial_state.copy()
+        
+        for t in range(time_horizon):
+            # Check failure
+            failure_value = env.failure_function(state)
+            if failure_value < 0:
+                return False  # Entered failure set
+            
+            # Apply safe controller
+            action = safe_controller(state, env)
+            state = env.dynamics(state, action)
+            
+            # Check bounds
+            bounds = env.get_state_bounds()
+            for j in range(len(state)):
+                state[j] = np.clip(state[j], bounds[j, 0], bounds[j, 1])
+        
+        return True  # Stayed safe
+    
+    # Create grid of states to test
+    bounds = env.get_state_bounds()
+    x_vals = np.linspace(bounds[0, 0], bounds[0, 1], resolution)
+    y_vals = np.linspace(bounds[1, 0], bounds[1, 1], resolution)
+    
+    # Store results: (x, y, theta) -> is_safe
+    results = {}
+    
+    print("\nSimulating trajectories...")
+    total = resolution ** 2 * len(theta_slices)
+    count = 0
+    
+    # Only loop over the theta slices we care about
+    for theta in theta_slices:
+        print(f"\n  Computing for θ = {theta:.2f} rad ({np.degrees(theta):.0f}°)...")
+        for x in x_vals:
+            for y in y_vals:
+                state = np.array([x, y, theta])
+                is_safe = simulate_trajectory(state, time_horizon)
+                results[(x, y, theta)] = is_safe
+                
+                count += 1
+                if count % 500 == 0:
+                    print(f"    Progress: {count}/{total} states ({100*count/total:.1f}%)")
+    
+    # Count statistics
+    safe_count = sum(1 for v in results.values() if v)
+    unsafe_count = len(results) - safe_count
+    
+    print(f"\n{'='*70}")
+    print("GROUND TRUTH CLASSIFICATION")
+    print(f"{'='*70}")
+    print(f"Safe states:   {safe_count:6d} ({100*safe_count/total:5.1f}%)")
+    print(f"Unsafe states: {unsafe_count:6d} ({100*unsafe_count/total:5.1f}%)")
+    
+    # Plot ground truth at different theta slices
+    fig, axes = plt.subplots(1, len(theta_slices), figsize=(5*len(theta_slices), 5))
+    
+    if len(theta_slices) == 1:
+        axes = [axes]
+    
+    for idx, (ax, theta_slice) in enumerate(zip(axes, theta_slices)):
+        # Create 2D grid for this theta slice
+        safety_grid = np.zeros((resolution, resolution))
+        
+        for i, y in enumerate(y_vals):
+            for j, x in enumerate(x_vals):
+                is_safe = results[(x, y, theta_slice)]
+                safety_grid[i, j] = 1.0 if is_safe else 0.0
+        
+        # Plot
+        im = ax.imshow(
+            safety_grid,
+            extent=[bounds[0, 0], bounds[0, 1], bounds[1, 0], bounds[1, 1]],
+            origin='lower',
+            cmap='RdYlGn',
+            vmin=0,
+            vmax=1,
+            aspect='auto',
+            alpha=0.9
+        )
+        
+        # Draw obstacle
+        if isinstance(env, DubinsCarEnvironment):
+            obstacle = Circle(
+                env.obstacle_position,
+                env.obstacle_radius,
+                color='red',
+                alpha=0.6,
+                edgecolor='black',
+                linewidth=2,
+                zorder=10
+            )
+            ax.add_patch(obstacle)
+        
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.set_xlim(bounds[0, 0], bounds[0, 1])
+        ax.set_ylim(bounds[1, 0], bounds[1, 1])
+        ax.set_aspect('equal')
+        ax.set_title(f'Ground Truth (θ={theta_slice:.2f} rad, {np.degrees(theta_slice):.0f}°)')
+        ax.grid(True, alpha=0.3, color='white', linewidth=0.5)
+        
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax)
+        cbar.set_label('Safe (1) / Unsafe (0)')
+    
+    fig.suptitle(f'Ground Truth Safe Set (Forward Simulation, T={time_horizon})', 
+                 fontsize=14, y=0.98)
+    plt.tight_layout()
+    
+    filepath = "./ground_truth_reachability.png"
+    plt.savefig(filepath, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"\n✓ Ground truth plot saved to: {filepath}")
+    
+    return results
 # ============================================================================
 # PART 7: MAIN INTERFACE
 # ============================================================================
@@ -1327,14 +1524,14 @@ def main():
                        help="Time step for dynamics integration")
     parser.add_argument('--obstacle-radius', type=float, default=1.3,
                        help="Radius of circular obstacle")
-    parser.add_argument('--gamma', type=float, default=0.9,
+    parser.add_argument('--gamma', type=float, default=0.5,
                        help="Discount factor (must satisfy γL_f < 1)")
     
     parser.add_argument('--resolution', type=int, default=10,
                        help="Grid resolution per dimension (Algorithm 1)")
     parser.add_argument('--iterations', type=int, default=200,
                        help="Maximum value iterations (Algorithm 1)")
-    parser.add_argument('--tolerance', type=float, default=1e-2,
+    parser.add_argument('--tolerance', type=float, default=0.03,
                        help="Convergence tolerance (Algorithm 1)")
     parser.add_argument('--plot-freq', type=int, default=25,
                        help="Plot frequency in iterations (Algorithm 1)")
@@ -1343,9 +1540,9 @@ def main():
                        help="Error tolerance for refinement (Algorithm 2)")
     parser.add_argument('--initial-resolution', type=int, default=8,
                        help="Initial coarse grid resolution (Algorithm 2)")
-    parser.add_argument('--refinements', type=int, default=10,
+    parser.add_argument('--refinements', type=int, default=25,
                        help="Maximum refinement iterations (Algorithm 2)")
-    parser.add_argument('--vi-iterations', type=int, default=100,
+    parser.add_argument('--vi-iterations', type=int, default=50,
                        help="VI iterations per refinement (Algorithm 2)")
     
     parser.add_argument('--samples', type=int, default=10,
@@ -1357,9 +1554,29 @@ def main():
                        help="Generate reachability visualization (Algorithm 1)")
     parser.add_argument('--plot-failure', action='store_true',
                        help="Generate failure function bounds plot (Algorithm 1)")
+    parser.add_argument('--plot-FT-HJ', action='store_true')
+    
     
     args = parser.parse_args()
-    
+    # CREATE GROUND TRUTH FIRST (before running algorithms)
+    print("="*70)
+    print("GENERATING GROUND TRUTH REFERENCE")
+    print("="*70)
+    if (args.plot_FT_HJ):
+        env = DubinsCarEnvironment(
+            v_const=args.velocity,
+            dt=args.dt,
+            obstacle_radius=args.obstacle_radius
+        )
+        
+        # Compute ground truth with direct sampling
+        ground_truth = compute_ground_truth_reachability(
+            env,
+            time_horizon=100,
+            resolution=100 
+        )
+        
+    # NOW run the selected algorithm
     if args.algorithm == 1:
         run_algorithm_1(args)
     else:
@@ -1380,4 +1597,5 @@ if __name__ == "__main__":
 # Cells whose successor sets include any updated cell (backward reachability)
 
 
-#python safety_value_function_3.py --algorithm 2 --resolution 10 --iterations 100  --plot-failure  --plot-reachability
+
+# python safety_value_function_3.py --algorithm 2 --resolution 1 --iterations 100 --lipschitz-reach --plot-failure  --plot-reachability --initial-resolution 503 --plot-FT-HJ
