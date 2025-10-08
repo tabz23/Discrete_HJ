@@ -350,8 +350,8 @@ class LipschitzReachabilityAnalyzer(ReachabilityAnalyzer):
         center_next = self.env.dynamics(center, action)
 
         L_f, _ = self.env.get_lipschitz_constants()
-        eta = 0.5 * cell.get_max_range()
-        expansion = L_f * eta
+        r = 0.5 * cell.get_max_range() #eta/2
+        expansion = L_f * r
 
         reach_bounds = np.zeros((self.env.get_state_dim(), 2))
 
@@ -622,9 +622,9 @@ class SafetyValueIterator:
         """Initialize stage cost bounds for all cells."""
         for cell in self.cell_tree.get_leaves():
             l_center = self.env.failure_function(cell.center)
-            eta = 0.5 * cell.get_max_range()
-            cell.l_lower = l_center - self.L_l * eta
-            cell.l_upper = l_center + self.L_l * eta
+            r = 0.5 * cell.get_max_range()#eta/2
+            cell.l_lower = l_center - self.L_l * r
+            cell.l_upper = l_center + self.L_l * r
             cell.V_lower = -np.inf
             cell.V_upper = np.inf
         
@@ -638,9 +638,9 @@ class SafetyValueIterator:
         for cell in new_cells:
             # Compute stage cost bounds
             l_center = self.env.failure_function(cell.center)
-            eta = 0.5 * cell.get_max_range()
-            cell.l_lower = l_center - self.L_l * eta
-            cell.l_upper = l_center + self.L_l * eta
+            r = 0.5 * cell.get_max_range()#eta/2
+            cell.l_lower = l_center - self.L_l * r
+            cell.l_upper = l_center + self.L_l * r
             
             # Always initialize value bounds to -∞/+∞ (conservative initialization)
             cell.V_lower = -np.inf
@@ -884,7 +884,7 @@ class AdaptiveRefinement:
     def refine(self, epsilon: float, max_refinements: int = 100,
                vi_iterations_per_refinement: int = 100):
         """Main adaptive refinement loop with proper LOCAL VI."""
-        eta_min = epsilon / (2 * self.L_l)
+        eta_min = epsilon / (self.L_l)
         
         print(f"\n{'='*70}")
         print("ADAPTIVE REFINEMENT CONFIGURATION")
@@ -2097,7 +2097,7 @@ def main():
                        help="Time step for dynamics integration")
     parser.add_argument('--obstacle-radius', type=float, default=1.3,
                        help="Radius of circular obstacle")
-    parser.add_argument('--gamma', type=float, default=0.5,
+    parser.add_argument('--gamma', type=float, default=0.2,
                        help="Discount factor (must satisfy γL_f < 1)")
     
     parser.add_argument('--resolution', type=int, default=10,
