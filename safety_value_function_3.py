@@ -418,6 +418,173 @@ class CenterOnlyReachabilityAnalyzer(ReachabilityAnalyzer):
         reach_bounds[2, :] = [theta_lower, theta_upper]
         
         return reach_bounds
+class GronwallReachabilityAnalyzer:
+    """
+    Reachability using Grönwall's inequality: expansion = r * e^(Lt)
+    
+    Theory:
+    -------
+    For Lipschitz continuous dynamics with constant L, starting from 
+    a ball B_r(x₀), the reachable set after time t satisfies:
+    
+        Φ_t(B_r(x₀)) ⊆ B_{r·e^(Lt)}(Φ_t(x₀))
+    
+    This accounts for exponential trajectory divergence during integration.
+    
+    Steps:
+    ------
+    1. Compute cell radius r (half of max range)
+    2. Propagate cell center: center_next = f(center, action)
+    3. Compute expansion: ε = r * e^(Lt)
+    4. Reachable bounds: [center_next - ε, center_next + ε]
+    """
+    
+    def __init__(self, env, use_infinity_norm: bool = True):
+        """
+        Args:
+            env: Environment with dynamics and Lipschitz constants
+            use_infinity_norm: If True, use ∞-norm. If False, use 2-norm.
+        """
+        self.env = env
+        self.use_infinity_norm = use_infinity_norm
+        
+        # Get Lipschitz constant L and time step dt
+        L_f, _ = env.get_lipschitz_constants()
+        self.L = L_f
+        self.dt = env.dt
+        
+        # Precompute exponential growth factor e^(Lt)
+        self.growth_factor = np.exp(self.L * self.dt)
+        
+        print(f"\nGrönwall Reachability Initialized:")
+        print(f"  Lipschitz constant L = {self.L}")
+        print(f"  Time step dt = {self.dt}")
+        print(f"  Growth factor e^(Lt) = {self.growth_factor:.6f}")
+        print(f"  Norm type: {'∞-norm (max)' if use_infinity_norm else '2-norm (Euclidean)'}")
+        
+        # Compare to simple Lipschitz
+        simple_factor = 1 + self.L * self.dt  # First-order approximation
+        print(f"  Simple Lipschitz would use: {simple_factor:.6f}")
+        print(f"  Grönwall is {100*(self.growth_factor/simple_factor - 1):.2f}% larger (correct!)")
+    
+    def compute_reachable_set(self, cell, action) -> np.ndarray:
+        """
+        Compute reachable set bounds using r * e^(Lt).
+        
+        Algorithm:
+        ----------
+        1. Get cell center and compute radius r
+        2. Propagate center: x_next = f(x_center, u)
+        3. Compute expansion: ε = r * e^(Lt)
+        4. Return bounds: [x_next - ε, x_next + ε] for each dimension
+        
+        Returns:
+            reach_bounds: [dim, 2] array of [min, max] for each dimension
+        """
+        # Step 1: Get cell center
+        center = cell.center
+        
+        # Step 2: Compute cell radius r
+        if self.use_infinity_norm:
+            # ∞-norm: r = max_j (range_j / 2) = η/2
+            r = 0.5 * cell.get_max_range() #similar to eta/2
+        else:
+            # 2-norm: r = ||[η_1/2, η_2/2, η_3/2]||_2
+            ranges = np.array([cell.get_range(j) for j in range(len(cell.bounds))])
+            r = 0.5 * np.linalg.norm(ranges)
+        
+        # Step 3: Propagate center forward one time step
+        center_next = self.env.dynamics(center, action)
+        
+        # Step 4: Compute Grönwall expansion: ε = r * e^(Lt)
+        expansion = r * self.growth_factor
+        
+        # Step 5: Create bounding box
+        reach_bounds = np.zeros((self.env.get_state_dim(), 2))
+        
+        # For x and y (Cartesian coordinates): simple ± expansion
+        reach_bounds[0, :] = [center_next[0] - expansion, center_next[0] + expansion]
+        reach_bounds[1, :] = [center_next[1] - expansion, center_next[1] + expansion]
+        
+        # For θ (angular coordinate): handle wraparound at ±π
+        theta_lower = center_next[2] - expansion
+        theta_upper = center_next[2] + expansion
+        
+        # Case 1: Expansion covers full circle
+        if theta_upper - theta_lower >= 2*np.pi:
+            reach_bounds[2, :] = [-np.pi, np.pi]
+        # Case 2: Wraps around -π
+        elif theta_lower < -np.pi:
+            reach_bounds[2, 0] = theta_lower + 2*np.pi  # Map to positive
+            reach_bounds[2, 1] = theta_upper
+        # Case 3: Wraps around +π
+        elif theta_upper > np.pi:
+            reach_bounds[2, 0] = theta_lower
+            reach_bounds[2, 1] = theta_upper - 2*np.pi  # Map to negative
+        # Case 4: No wraparound
+        else:
+            reach_bounds[2, :] = [theta_lower, theta_upper]
+        
+        return reach_bounds
+    
+    def compute_successor_cells(self, cell, action, cell_tree) -> List[Cell]:
+        """
+        Find all cells that intersect the reachable set.
+        
+        Algorithm:
+        ----------
+        1. Compute reachable bounds using compute_reachable_set()
+        2. For each leaf cell in the tree:
+            a. Check if x-ranges overlap
+            b. Check if y-ranges overlap
+            c. Check if θ-ranges overlap (handle wraparound)
+        3. Return cells that overlap in ALL dimensions
+        
+        Returns:
+            List of successor cells
+        """
+        # Step 1: Get reachable bounds
+        reach_bounds = self.compute_reachable_set(cell, action)
+        
+        # Check if theta interval wraps around ±π
+        theta_wraps = reach_bounds[2, 1] < reach_bounds[2, 0]
+        
+        successors = []
+        
+        # Step 2: Check each leaf cell for intersection
+        for candidate in cell_tree.get_leaves():
+            # Step 2a: Check x-coordinate overlap
+            # No overlap if: candidate_max < reach_min OR candidate_min > reach_max
+            if (candidate.bounds[0, 1] < reach_bounds[0, 0] or 
+                candidate.bounds[0, 0] > reach_bounds[0, 1]):
+                continue  # Skip this cell
+            
+            # Step 2b: Check y-coordinate overlap
+            if (candidate.bounds[1, 1] < reach_bounds[1, 0] or 
+                candidate.bounds[1, 0] > reach_bounds[1, 1]):
+                continue  # Skip this cell
+            
+            # Step 2c: Check θ-coordinate overlap (special case for wraparound)
+            cand_theta_min = candidate.bounds[2, 0]
+            cand_theta_max = candidate.bounds[2, 1]
+            reach_theta_min = reach_bounds[2, 0]
+            reach_theta_max = reach_bounds[2, 1]
+            
+            if theta_wraps:
+                # Reachable set is [reach_min, π] ∪ [-π, reach_max]
+                # Overlap if candidate touches either part
+                overlaps = (cand_theta_max >= reach_theta_min or 
+                           cand_theta_min <= reach_theta_max)
+            else:
+                # Normal interval: [reach_min, reach_max]
+                overlaps = not (cand_theta_max < reach_theta_min or 
+                              cand_theta_min > reach_theta_max)
+            
+            # Step 3: Add to successors if all dimensions overlap
+            if overlaps:
+                successors.append(candidate)
+        
+        return successors
 # ============================================================================
 # PART 4: VALUE ITERATION (ALGORITHM 1 - FIXED)
 # ============================================================================
@@ -460,23 +627,24 @@ class SafetyValueIterator:
             cell.l_upper = l_center + self.L_l * eta
             cell.V_lower = -np.inf
             cell.V_upper = np.inf
-    
+        
     def initialize_new_cells(self, new_cells: List[Cell]):
-        """Initialize new cells with parent value inheritance."""
+        """
+        Initialize new cells after refinement.
+        
+        Always initializes with V_lower = -∞ and V_upper = +∞ (no parent inheritance).
+        The local value iteration will then compute proper bounds.
+        """
         for cell in new_cells:
+            # Compute stage cost bounds
             l_center = self.env.failure_function(cell.center)
             eta = 0.5 * cell.get_max_range()
             cell.l_lower = l_center - self.L_l * eta
             cell.l_upper = l_center + self.L_l * eta
             
-            # if (hasattr(cell, 'parent') and cell.parent and 
-            #     cell.parent.V_upper is not None and cell.parent.V_lower is not None):
-            #     cell.V_lower = cell.parent.V_lower
-            #     cell.V_upper = cell.parent.V_upper
-            # else:
+            # Always initialize value bounds to -∞/+∞ (conservative initialization)
             cell.V_lower = -np.inf
             cell.V_upper = np.inf
-    
     # def bellman_update(self, cell: Cell) -> Tuple[float, float]:
     #     """Single Bellman update for a cell."""
     #     max_upper = -np.inf###CHECK THIS
@@ -594,58 +762,79 @@ class SafetyValueIterator:
     def local_value_iteration(self, updated_cells: Set[Cell], max_iterations: int = 100,
                             convergence_tol: float = 1e-3) -> Tuple[np.ndarray, np.ndarray]:
         """
-        LOCAL value iteration: only update cells affected by refinement.
+        LOCAL value iteration: only update BOUNDARY cells.
         
-        Affected cells include:
-        1. The newly created cells
-        2. Cells whose successor set includes any updated cell
+        After refinement, we identify all cells where V̄(s) > 0 and V_(s) < 0
+        (the boundary/uncertain region) and run value iteration only on those cells.
+        
+        Safe cells (V_(s) > 0) and unsafe cells (V̄(s) < 0) are NOT updated,
+        even if their successor sets include refined cells.
+        
+        Args:
+            updated_cells: The newly created cells from refinement (used for tracking only)
+            max_iterations: Maximum number of iterations
+            convergence_tol: Convergence tolerance
+            
+        Returns:
+            Tuple of convergence histories (upper, lower)
         """
-        # Find all cells that can reach updated cells
-        affected = set(updated_cells)
+        # Identify ALL boundary cells in the current grid
+        boundary_cells = set()
+        for cell in self.cell_tree.get_leaves():
+            if cell.V_upper is not None and cell.V_lower is not None:
+                if cell.V_upper > 0 and cell.V_lower < 0:
+                    boundary_cells.add(cell)
         
-        ###ASK IF KEEP OR REMOVE THIS ASK IF KEEP OR REMOVE THIS ASK IF KEEP OR REMOVE THIS 
-        # for cell in self.cell_tree.get_leaves():
-        #     if cell in affected:
-        #         continue
-        #     for action in self.env.get_action_space():
-        #         successors = self.reachability.compute_successor_cells(cell, action, self.cell_tree)
-        #         if any(s in affected for s in successors):
-        #             affected.add(cell) ##CHECK IF KEEP OR NO
-        #             break
+        print(f"  Local VI: {len(boundary_cells)} boundary cells "
+            f"(out of {self.cell_tree.get_num_leaves()} total)")
+        print(f"    Including {len(updated_cells & boundary_cells)} newly created cells")
         
-        print(f"  Local VI: {len(affected)} affected cells (out of {self.cell_tree.get_num_leaves()} total)")
+        if len(boundary_cells) == 0:
+            print("    No boundary cells to update!")
+            return np.array([]), np.array([])
         
         conv_history_upper = []
         conv_history_lower = []
         
         for iteration in range(max_iterations):
-            prev_upper = {cell.cell_id: cell.V_upper for cell in affected}
-            prev_lower = {cell.cell_id: cell.V_lower for cell in affected}
+            prev_upper = {cell.cell_id: cell.V_upper for cell in boundary_cells}
+            prev_lower = {cell.cell_id: cell.V_lower for cell in boundary_cells}
             
             updates = {}
-            for cell in affected:
+            for cell in boundary_cells:
                 new_upper, new_lower = self.bellman_update(cell)
                 updates[cell.cell_id] = (new_upper, new_lower)
             
-            for cell in affected:
+            for cell in boundary_cells:
                 cell.V_upper, cell.V_lower = updates[cell.cell_id]
             
-            diff_upper = max(abs(cell.V_upper - prev_upper[cell.cell_id]) for cell in affected)
-            diff_lower = max(abs(cell.V_lower - prev_lower[cell.cell_id]) for cell in affected)
+            diff_upper = max(abs(cell.V_upper - prev_upper[cell.cell_id]) 
+                            for cell in boundary_cells)
+            diff_lower = max(abs(cell.V_lower - prev_lower[cell.cell_id]) 
+                            for cell in boundary_cells)
             
             conv_history_upper.append(diff_upper)
             conv_history_lower.append(diff_lower)
             
             print(f"    Iter {iteration + 1}: "
-                  f"||V̄^k - V̄^{{k-1}}||_∞ = {diff_upper:.6f}, "
-                  f"||V_^k - V_^{{k-1}}||_∞ = {diff_lower:.6f}")
+                f"||V̄^k - V̄^{{k-1}}||_∞ = {diff_upper:.6f}, "
+                f"||V_^k - V_^{{k-1}}||_∞ = {diff_lower:.6f}")
             
             if diff_upper < convergence_tol and diff_lower < convergence_tol:
                 print(f"    ✓ Local VI converged at iteration {iteration + 1}!")
                 break
         
         return np.array(conv_history_upper), np.array(conv_history_lower)
-    
+
+
+    def _identify_boundary_cells(self) -> List[Cell]:
+        """Identify boundary cells where V̄_γ(s) > 0 and V_γ(s) < 0."""
+        boundary = []
+        for cell in self.cell_tree.get_leaves():
+            if cell.V_upper is not None and cell.V_lower is not None:
+                if cell.V_upper > 0 and cell.V_lower < 0:
+                    boundary.append(cell)
+        return boundary
     def _save_plot(self, iteration: int, final: bool = False):
         """Save visualization with refinement phase in filename."""
         suffix = "_final" if final else ""
@@ -786,9 +975,9 @@ class AdaptiveRefinement:
                 print(f"\nInitializing {len(new_cells)} new cells...")
                 self.value_iterator.initialize_new_cells(new_cells)
                 
-                inherited = sum(1 for c in new_cells 
-                              if c.V_upper != np.inf and c.V_lower != -np.inf)
-                print(f"  Inherited parent values: {inherited}/{len(new_cells)} cells")
+                # inherited = sum(1 for c in new_cells 
+                #               if c.V_upper != np.inf and c.V_lower != -np.inf)
+                # print(f"  Inherited parent values: {inherited}/{len(new_cells)} cells")
                 
                 # Plot l bounds after refinement
                 plot_failure_function_bounds(
@@ -1735,16 +1924,23 @@ def run_algorithm_1(args):
     cell_tree = CellTree(env.get_state_bounds(), initial_resolution=args.resolution)
     print(f"  Total cells: {cell_tree.get_num_leaves()}")
     
-    # Select reachability analyzer
-    if args.center_only:
+    # SELECT REACHABILITY ANALYZER (add Grönwall option)
+    if args.gronwall_reach:
+        reachability = GronwallReachabilityAnalyzer(
+            env, 
+            use_infinity_norm=args.use_inf_norm
+        )
+        print("  Using Grönwall-based reachability (exponential growth via e^(Lt))")
+    elif args.center_only:
         reachability = CenterOnlyReachabilityAnalyzer(env, samples_per_dim=args.samples)
-        print(f"  Using CENTER-ONLY reachability (debugging mode - INCORRECT but simple)")
+        print("  Using CENTER-ONLY reachability (debugging mode)")
     elif args.lipschitz_reach:
         reachability = LipschitzReachabilityAnalyzer(env, samples_per_dim=args.samples)
-        print(f"  Using Lipschitz-based reachability (faster)")
+        print("  Using Lipschitz-based reachability (linear growth)")
     else:
         reachability = ReachabilityAnalyzer(env, samples_per_dim=args.samples)
         print(f"  Using sampling-based reachability ({args.samples} samples/dim)")
+    
     value_iter = SafetyValueIterator(
         env=env,
         gamma=args.gamma,
@@ -1839,13 +2035,19 @@ def run_algorithm_2(args):
     cell_tree = CellTree(env.get_state_bounds(), initial_resolution=args.initial_resolution)
     print(f"  Initial cells: {cell_tree.get_num_leaves()}")
     
-    # Select reachability analyzer
-    if args.center_only:
+    # SELECT REACHABILITY ANALYZER (add Grönwall option)
+    if args.gronwall_reach:
+        reachability = GronwallReachabilityAnalyzer(
+            env, 
+            use_infinity_norm=args.use_inf_norm
+        )
+        print("  Using Grönwall-based reachability (exponential growth via e^(Lt))")
+    elif args.center_only:
         reachability = CenterOnlyReachabilityAnalyzer(env, samples_per_dim=args.samples)
-        print(f"  Using CENTER-ONLY reachability (debugging mode - INCORRECT but simple)")
+        print("  Using CENTER-ONLY reachability (debugging mode)")
     elif args.lipschitz_reach:
         reachability = LipschitzReachabilityAnalyzer(env, samples_per_dim=args.samples)
-        print(f"  Using Lipschitz-based reachability (faster)")
+        print("  Using Lipschitz-based reachability (linear growth)")
     else:
         reachability = ReachabilityAnalyzer(env, samples_per_dim=args.samples)
         print(f"  Using sampling-based reachability ({args.samples} samples/dim)")
@@ -1922,6 +2124,13 @@ def main():
                        help="Use Lipschitz-based reachability (faster)")
     parser.add_argument('--center-only', action='store_true',
                    help="Use center-only reachability (debugging mode - INCORRECT)")
+    parser.add_argument('--gronwall-reach', action='store_true',
+                       help="Use Grönwall-based reachability (r*e^(Lt) expansion)")
+    parser.add_argument('--use-inf-norm', action='store_true', default=True,
+                       help="Use infinity norm for Grönwall radius (default: True)")
+    parser.add_argument('--use-2-norm', dest='use_inf_norm', action='store_false',
+                       help="Use 2-norm (Euclidean) for Grönwall radius")
+    
     
     parser.add_argument('--plot-reachability', action='store_true',
                        help="Generate reachability visualization (Algorithm 1)")
