@@ -77,7 +77,7 @@ class DubinsCarEnvironment(Environment):
             self.obstacle_position = obstacle_position
             
         self.obstacle_radius = obstacle_radius
-        self.L_f = max(1.0, v_const * dt)
+        self.L_f = 1.0 + v_const * dt
         self.L_l = 1.0
         self.actions = [-1.0, 0.0, 1.0]
     
