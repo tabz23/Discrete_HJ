@@ -231,111 +231,193 @@ class CellTree:
     def get_num_leaves(self) -> int:
         return len(self.leaves)
 
-
 # ============================================================================
-# PART 3: REACHABILITY ANALYSIS
+# PART 3: REACHABILITY ANALYSIS (FIXED ANGULAR HANDLING)
 # ============================================================================
-
 class ReachabilityAnalyzer:
-    """Computes forward reachable sets using grid-based over-approximation."""
+    """Computes forward reachable sets using grid-based over-approximation.
+    FIXED: Handles angular wrap-around for theta ∈ [-π, π].
+    """
     
     def __init__(self, env: Environment, samples_per_dim: int = 5):
         self.env = env
         self.samples_per_dim = samples_per_dim
+
+    @staticmethod
+    def _compute_theta_bounds(thetas: np.ndarray) -> Tuple[float, float]:
+        """
+        Compute minimal bounding interval for angles within [-π, π].
+        Returns (lower, upper) where the set spans from lower to upper.
+        If lower > upper, the interval wraps around ±π.
+        """
+        if len(thetas) == 0:
+            return 0.0, 0.0
         
-    def compute_reachable_set(self, cell: Cell, action) -> np.ndarray:
-        samples = self._sample_cell(cell)
-        next_states = []
-        for state in samples:
-            next_state = self.env.dynamics(state, action)
-            next_states.append(next_state)
+        if len(thetas) == 1:
+            return thetas[0], thetas[0]
         
-        next_states = np.array(next_states)
-        reach_bounds = np.zeros((self.env.get_state_dim(), 2))
-        reach_bounds[:, 0] = np.min(next_states, axis=0)
-        reach_bounds[:, 1] = np.max(next_states, axis=0)
+        # Sort angles
+        thetas_sorted = np.sort(thetas)
         
-        # Check for theta issues
-        theta_min = reach_bounds[2, 0]
-        theta_max = reach_bounds[2, 1]
-        theta_span = theta_max - theta_min
+        # Find largest gap between consecutive angles
+        gaps = np.diff(thetas_sorted)
         
-        # Warning 1: Theta values outside [-π, π]
-        if abs(theta_min) > np.pi + 0.01 or abs(theta_max) > np.pi + 0.01:
-            print(f"⚠️  WARNING: Theta bounds outside [-π, π]!")
-            print(f"   Cell center: {cell.center}")
-            print(f"   Action: {action}")
-            print(f"   Theta bounds: [{theta_min:.3f}, {theta_max:.3f}]")
+        # Also check gap wrapping from last to first
+        wrap_gap = (thetas_sorted[0] + 2*np.pi) - thetas_sorted[-1]
         
-        # Warning 2: Theta span larger than expected (indicates wraparound issue)
-        # For Dubins car with dt=0.1 and max angular velocity |ω|=1.0:
-        # Maximum theta change = 1.0 * 0.1 = 0.1 rad
-        # Plus cell size uncertainty, reasonable span should be < 1.0 rad
-        max_expected_span = 1.0  # Adjust based on your system
-        
-        if theta_span > max_expected_span:
-            theta_vals = next_states[:, 2]
-            theta_sorted = np.sort(theta_vals)
-            
-            # Check for discontinuity (large gap indicating wraparound)
-            gaps = np.diff(theta_sorted)
-            max_gap = np.max(gaps) if len(gaps) > 0 else 0
-            
-            if max_gap > np.pi:
-                print(f"⚠️  WARNING: Theta wraparound detected!")
-                print(f"   Cell center: {cell.center}")
-                print(f"   Cell theta bounds: [{cell.bounds[2, 0]:.3f}, {cell.bounds[2, 1]:.3f}]")
-                print(f"   Action: {action}")
-                print(f"   Computed theta bounds: [{theta_min:.3f}, {theta_max:.3f}]")
-                print(f"   Theta span: {theta_span:.3f} rad (expected < {max_expected_span:.3f})")
-                print(f"   Max gap in sorted samples: {max_gap:.3f} rad")
-                print(f"   Sample theta values (first 5): {theta_vals[:5]}")
-                print(f"   Sample theta values (sorted): {theta_sorted[[0, 1, -2, -1]]}")
-                print(f"   This causes massive over-approximation of reachable set!")
-        
-        return reach_bounds
-        
-    def compute_successor_cells(self, cell: Cell, action, cell_tree: CellTree) -> List[Cell]:
-        reach_bounds = self.compute_reachable_set(cell, action)
-        successors = []
-        for candidate in cell_tree.get_leaves():
-            if candidate.intersects(reach_bounds):
-                successors.append(candidate)
-        return successors
-    
+        # Find location of largest gap
+        if wrap_gap >= np.max(gaps):
+            # No wrap-around case
+            return thetas_sorted[0], thetas_sorted[-1]
+        else:
+            # Wrapped case — cut at largest internal gap
+            max_gap_idx = np.argmax(gaps)
+            lower = thetas_sorted[max_gap_idx + 1]
+            upper = thetas_sorted[max_gap_idx]
+            return lower, upper
+
     def _sample_cell(self, cell: Cell) -> np.ndarray:
         dim_samples = []
         for j in range(len(cell.bounds)):
             a, b = cell.bounds[j]
             dim_samples.append(np.linspace(a, b, self.samples_per_dim))
-        
-        samples = []
-        for point in product(*dim_samples):
-            samples.append(np.array(point))
-        
+        samples = [np.array(point) for point in product(*dim_samples)]
         return np.array(samples)
+
+    def compute_reachable_set(self, cell: Cell, action) -> np.ndarray:
+        """Return bounding box [dim, 2] of reachable states."""
+        samples = self._sample_cell(cell)
+        next_states = np.array([self.env.dynamics(s, action) for s in samples])
+
+        reach_bounds = np.zeros((self.env.get_state_dim(), 2))
+
+        # Cartesian dimensions: simple min/max
+        reach_bounds[0, 0] = np.min(next_states[:, 0])
+        reach_bounds[0, 1] = np.max(next_states[:, 0])
+        reach_bounds[1, 0] = np.min(next_states[:, 1])
+        reach_bounds[1, 1] = np.max(next_states[:, 1])
+
+        # Angular dimension (θ): handle wraparound
+        lower, upper = self._compute_theta_bounds(next_states[:, 2])
+        reach_bounds[2, 0] = lower
+        reach_bounds[2, 1] = upper
+        
+        return reach_bounds
+
+    def compute_successor_cells(self, cell: Cell, action, cell_tree: CellTree) -> List[Cell]:
+        reach_bounds = self.compute_reachable_set(cell, action)
+        
+        # Check if theta wraps around
+        theta_wraps = reach_bounds[2, 1] < reach_bounds[2, 0]
+        
+        successors = []
+        for candidate in cell_tree.get_leaves():
+            # Check x, y intersection (normal)
+            if (candidate.bounds[0, 1] < reach_bounds[0, 0] or 
+                candidate.bounds[0, 0] > reach_bounds[0, 1]):
+                continue
+            if (candidate.bounds[1, 1] < reach_bounds[1, 0] or 
+                candidate.bounds[1, 0] > reach_bounds[1, 1]):
+                continue
+            
+            # Check theta intersection (handle wraparound)
+            cand_theta_min = candidate.bounds[2, 0]
+            cand_theta_max = candidate.bounds[2, 1]
+            reach_theta_min = reach_bounds[2, 0]
+            reach_theta_max = reach_bounds[2, 1]
+            
+            if theta_wraps:
+                # Reachable set wraps: [reach_min, π] ∪ [-π, reach_max]
+                # Candidate intersects if it overlaps either part
+                overlaps = (cand_theta_max >= reach_theta_min or 
+                           cand_theta_min <= reach_theta_max)
+            else:
+                # Normal case: [reach_min, reach_max]
+                overlaps = not (cand_theta_max < reach_theta_min or 
+                              cand_theta_min > reach_theta_max)
+            
+            if overlaps:
+                successors.append(candidate)
+        
+        return successors
 
 
 class LipschitzReachabilityAnalyzer(ReachabilityAnalyzer):
     """Enhanced reachability using Lipschitz bounds."""
-    
+
     def compute_reachable_set(self, cell: Cell, action) -> np.ndarray:
         center = cell.center
         center_next = self.env.dynamics(center, action)
-        
+
         L_f, _ = self.env.get_lipschitz_constants()
         eta = 0.5 * cell.get_max_range()
-        
-        reach_bounds = np.zeros((self.env.get_state_dim(), 2))
         expansion = L_f * eta
+
+        reach_bounds = np.zeros((self.env.get_state_dim(), 2))
+
+        # Cartesian coordinates: simple expansion
+        reach_bounds[0, :] = [center_next[0] - expansion, center_next[0] + expansion]
+        reach_bounds[1, :] = [center_next[1] - expansion, center_next[1] + expansion]
+
+        # θ: expand symmetrically, then check if it wraps
+        theta_lower = center_next[2] - expansion
+        theta_upper = center_next[2] + expansion
         
-        for j in range(self.env.get_state_dim()):
-            reach_bounds[j, 0] = center_next[j] - expansion
-            reach_bounds[j, 1] = center_next[j] + expansion
+        # Clamp to [-π, π] and check for wraparound
+        if theta_upper - theta_lower >= 2*np.pi:
+            # Expansion covers entire circle
+            reach_bounds[2, :] = [-np.pi, np.pi]
+        elif theta_lower < -np.pi:
+            # Wraps around -π
+            reach_bounds[2, 0] = theta_lower + 2*np.pi  # Wrap to positive
+            reach_bounds[2, 1] = theta_upper
+        elif theta_upper > np.pi:
+            # Wraps around +π
+            reach_bounds[2, 0] = theta_lower
+            reach_bounds[2, 1] = theta_upper - 2*np.pi  # Wrap to negative
+        else:
+            # No wraparound
+            reach_bounds[2, :] = [theta_lower, theta_upper]
+
+        return reach_bounds
+    
+class CenterOnlyReachabilityAnalyzer(ReachabilityAnalyzer):
+    """
+    Simplest reachability: only use cell center with one dynamics step.
+    No sampling, no bounds expansion - just check which cell contains the next center.
+    
+    This is INCORRECT but useful for debugging.
+    """
+    
+    def compute_reachable_set(self, cell: Cell, action) -> np.ndarray:
+        """
+        For compatibility, return a point-set around the next center.
+        Not actually used by compute_successor_cells above.
+        """
+        center_next = self.env.dynamics(cell.center, action)
+        
+        # Return a tiny box around the next center
+        eps = 0.2
+        reach_bounds = np.zeros((self.env.get_state_dim(), 2))
+        
+        # Cartesian dimensions (x, y)
+        for dim in range(2):
+            reach_bounds[dim, :] = [center_next[dim] - eps, center_next[dim] + eps]
+        
+        # Angular dimension (theta) - handle wraparound
+        theta = center_next[2]
+        theta_lower = theta - eps
+        theta_upper = theta + eps
+        
+        # Since eps is tiny, wraparound is unlikely but handle it:
+        if theta_lower < -np.pi:
+            theta_lower = theta_lower + 2*np.pi
+        if theta_upper > np.pi:
+            theta_upper = theta_upper - 2*np.pi
+        
+        reach_bounds[2, :] = [theta_lower, theta_upper]
         
         return reach_bounds
-
-
 # ============================================================================
 # PART 4: VALUE ITERATION (ALGORITHM 1 - FIXED)
 # ============================================================================
@@ -395,28 +477,65 @@ class SafetyValueIterator:
             cell.V_lower = -np.inf
             cell.V_upper = np.inf
     
+    # def bellman_update(self, cell: Cell) -> Tuple[float, float]:
+    #     """Single Bellman update for a cell."""
+    #     max_upper = -np.inf###CHECK THIS
+    #     max_lower = -np.inf
+        
+    #     for action in self.env.get_action_space():
+    #         successors = self.reachability.compute_successor_cells(cell, action, self.cell_tree)
+    #         if len(successors) == 0:
+    #             continue
+            
+    #         upper_vals = [s.V_upper for s in successors if s.V_upper is not None]
+    #         if upper_vals:
+    #             action_upper = self.gamma * max(upper_vals)
+    #             max_upper = max(max_upper, action_upper)
+            
+    #         lower_vals = [s.V_lower for s in successors if s.V_lower is not None]
+    #         if lower_vals:
+    #             action_lower = self.gamma * min(lower_vals)
+    #             max_lower = max(max_lower, action_lower)
+        
+    #     new_V_upper = min(cell.l_upper, max_upper) if max_upper > -np.inf else cell.l_upper
+    #     new_V_lower = min(cell.l_lower, max_lower) if max_lower > -np.inf else cell.l_lower
+    #     return new_V_upper, new_V_lower
     def bellman_update(self, cell: Cell) -> Tuple[float, float]:
-        """Single Bellman update for a cell."""
-        max_upper = -np.inf###CHECK THIS
-        max_lower = -np.inf
+        """
+        Single Bellman update for a cell.
+        
+        CONSERVATIVE VERSION: Uses the same action for both upper and lower bounds.
+        The action is selected to maximize the lower bound, and that same action's
+        upper bound is used for the upper value update.
+        """
+        best_min_val = -np.inf
+        best_max_val = -np.inf
         
         for action in self.env.get_action_space():
             successors = self.reachability.compute_successor_cells(cell, action, self.cell_tree)
             if len(successors) == 0:
                 continue
             
+            # Compute BOTH bounds for this action
             upper_vals = [s.V_upper for s in successors if s.V_upper is not None]
-            if upper_vals:
-                action_upper = self.gamma * max(upper_vals)
-                max_upper = max(max_upper, action_upper)
-            
             lower_vals = [s.V_lower for s in successors if s.V_lower is not None]
-            if lower_vals:
-                action_lower = self.gamma * min(lower_vals)
-                max_lower = max(max_lower, action_lower)
+            
+            if not lower_vals or not upper_vals:
+                continue
+            
+            # For THIS action: min over lower bounds, max over upper bounds
+            action_lower = self.gamma * min(lower_vals)
+            action_upper = self.gamma * max(upper_vals)
+            
+            # Select action that maximizes the lower bound (conservative choice)
+            if action_lower > best_min_val:
+                best_min_val = action_lower
+                best_max_val = action_upper  # Use the SAME action's upper bound
         
-        new_V_upper = min(cell.l_upper, max_upper) if max_upper > -np.inf else cell.l_upper
-        new_V_lower = min(cell.l_lower, max_lower) if max_lower > -np.inf else cell.l_lower
+        # Apply the min with stage costs
+        new_V_lower = min(cell.l_lower, best_min_val) if best_min_val > -np.inf else cell.l_lower
+        new_V_upper = min(cell.l_upper, best_max_val) if best_max_val > -np.inf else cell.l_upper
+        
         return new_V_upper, new_V_lower
     
     def value_iteration(self, max_iterations: int = 1000, convergence_tol: float = 1e-3,
@@ -1616,13 +1735,16 @@ def run_algorithm_1(args):
     cell_tree = CellTree(env.get_state_bounds(), initial_resolution=args.resolution)
     print(f"  Total cells: {cell_tree.get_num_leaves()}")
     
-    if args.lipschitz_reach:
+    # Select reachability analyzer
+    if args.center_only:
+        reachability = CenterOnlyReachabilityAnalyzer(env, samples_per_dim=args.samples)
+        print(f"  Using CENTER-ONLY reachability (debugging mode - INCORRECT but simple)")
+    elif args.lipschitz_reach:
         reachability = LipschitzReachabilityAnalyzer(env, samples_per_dim=args.samples)
         print(f"  Using Lipschitz-based reachability (faster)")
     else:
         reachability = ReachabilityAnalyzer(env, samples_per_dim=args.samples)
         print(f"  Using sampling-based reachability ({args.samples} samples/dim)")
-    
     value_iter = SafetyValueIterator(
         env=env,
         gamma=args.gamma,
@@ -1717,12 +1839,16 @@ def run_algorithm_2(args):
     cell_tree = CellTree(env.get_state_bounds(), initial_resolution=args.initial_resolution)
     print(f"  Initial cells: {cell_tree.get_num_leaves()}")
     
-    if args.lipschitz_reach:
+    # Select reachability analyzer
+    if args.center_only:
+        reachability = CenterOnlyReachabilityAnalyzer(env, samples_per_dim=args.samples)
+        print(f"  Using CENTER-ONLY reachability (debugging mode - INCORRECT but simple)")
+    elif args.lipschitz_reach:
         reachability = LipschitzReachabilityAnalyzer(env, samples_per_dim=args.samples)
-        print(f"  Using Lipschitz-based reachability")
+        print(f"  Using Lipschitz-based reachability (faster)")
     else:
         reachability = ReachabilityAnalyzer(env, samples_per_dim=args.samples)
-        print(f"  Using sampling-based reachability")
+        print(f"  Using sampling-based reachability ({args.samples} samples/dim)")
     
     rname = type(reachability).__name__
     output_dir = f"./results_adaptive/{rname}"
@@ -1794,6 +1920,8 @@ def main():
                        help="Samples per dimension for reachability")
     parser.add_argument('--lipschitz-reach', action='store_true',
                        help="Use Lipschitz-based reachability (faster)")
+    parser.add_argument('--center-only', action='store_true',
+                   help="Use center-only reachability (debugging mode - INCORRECT)")
     
     parser.add_argument('--plot-reachability', action='store_true',
                        help="Generate reachability visualization (Algorithm 1)")
