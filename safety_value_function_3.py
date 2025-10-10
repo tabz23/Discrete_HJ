@@ -585,6 +585,7 @@ class GronwallReachabilityAnalyzer:
                 successors.append(candidate)
         
         return successors
+    
 # ============================================================================
 # PART 4: VALUE ITERATION (ALGORITHM 1 - FIXED)
 # ============================================================================
@@ -730,9 +731,10 @@ class SafetyValueIterator:
             for cell in self.cell_tree.get_leaves():
                 new_upper, new_lower = self.bellman_update(cell)
                 updates[cell.cell_id] = (new_upper, new_lower)
-            
-            for cell in self.cell_tree.get_leaves():
                 cell.V_upper, cell.V_lower = updates[cell.cell_id]
+            
+            # for cell in self.cell_tree.get_leaves():
+            #     cell.V_upper, cell.V_lower = updates[cell.cell_id]
             
             diff_upper = max(abs(cell.V_upper - prev_upper[cell.cell_id]) 
                            for cell in self.cell_tree.get_leaves())
@@ -1151,12 +1153,12 @@ def _plot_slice(
     y_grid = np.linspace(y_min, y_max, resolution)
     X, Y = np.meshgrid(x_grid, y_grid)
     
-    # Evaluate value function at each grid point using tree traversal
+   
     V = np.full_like(X, np.nan, dtype=float)
     for i in range(resolution):
         for j in range(resolution):
             state = np.array([X[i, j], Y[i, j], theta])
-            cell = cell_tree.get_cell_containing_point(state)  # Tree traversal!
+            cell = cell_tree.get_cell_containing_point(state)  # leaf traversal!
             
             if cell is not None:
                 if upper and cell.V_upper is not None:
@@ -1771,10 +1773,9 @@ def compute_ground_truth_reachability(
         actions = env.get_action_space()
         if angle_diff > 0:
             return actions[-1]  # Turn left
-        elif angle_diff < 0:
-            return actions[0]   # Turn right
         else:
-            return actions[1]   # Go straight
+            return actions[0]   # Turn right
+     
 
     def simulate_trajectory(initial_state: np.ndarray, time_horizon: int) -> bool:
         """
@@ -2097,14 +2098,14 @@ def main():
                        help="Time step for dynamics integration")
     parser.add_argument('--obstacle-radius', type=float, default=1.3,
                        help="Radius of circular obstacle")
-    parser.add_argument('--gamma', type=float, default=0.2,
+    parser.add_argument('--gamma', type=float, default=0.1,
                        help="Discount factor (must satisfy γL_f < 1)")
     
     parser.add_argument('--resolution', type=int, default=10,
                        help="Grid resolution per dimension (Algorithm 1)")
     parser.add_argument('--iterations', type=int, default=200,
                        help="Maximum value iterations (Algorithm 1)")
-    parser.add_argument('--tolerance', type=float, default=0.03,
+    parser.add_argument('--tolerance', type=float, default=0.002,
                        help="Convergence tolerance (Algorithm 1)")
     parser.add_argument('--plot-freq', type=int, default=25,
                        help="Plot frequency in iterations (Algorithm 1)")
@@ -2154,8 +2155,8 @@ def main():
         # Compute ground truth with direct sampling
         ground_truth = compute_ground_truth_reachability(
             env,
-            time_horizon=100,
-            resolution=100 
+            time_horizon=150,
+            resolution=80 
         )
         
     # NOW run the selected algorithm
@@ -2180,4 +2181,6 @@ if __name__ == "__main__":
 
 
 
-# python safety_value_function_3.py --algorithm 2 --resolution 1 --iterations 100 --lipschitz-reach --plot-failure  --plot-reachability --initial-resolution 503 --plot-FT-HJ
+# python safety_value_function_3.py --algorithm 2 --resolution 1 --iterations 100 --lipschitz-reach --plot-failure  --plot-reachability --initial-resolution 51 
+
+# python safety_value_function_3.py --algorithm 2 --resolution 1 --iterations 100 --lipschitz-reach --plot-failure  --plot-reachability --initial-resolution 1 --gamma 0.05 --dt 0.05
