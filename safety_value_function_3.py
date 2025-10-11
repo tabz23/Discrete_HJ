@@ -231,212 +231,11 @@ class CellTree:
     def get_num_leaves(self) -> int:
         return len(self.leaves)
 
-# ============================================================================
-# PART 3: REACHABILITY ANALYSIS (FIXED ANGULAR HANDLING)
-# ============================================================================
-class ReachabilityAnalyzer:
-    """Computes forward reachable sets using grid-based over-approximation.
-    FIXED: Handles angular wrap-around for theta ∈ [-π, π].
-    """
-    
-    def __init__(self, env: Environment, samples_per_dim: int = 5):
-        self.env = env
-        self.samples_per_dim = samples_per_dim
-
-    @staticmethod
-    def _compute_theta_bounds(thetas: np.ndarray) -> Tuple[float, float]:
-        """
-        Compute minimal bounding interval for angles within [-π, π].
-        Returns (lower, upper) where the set spans from lower to upper.
-        If lower > upper, the interval wraps around ±π.
-        """
-        if len(thetas) == 0:
-            return 0.0, 0.0
-        
-        if len(thetas) == 1:
-            return thetas[0], thetas[0]
-        
-        # Sort angles
-        thetas_sorted = np.sort(thetas)
-        
-        # Find largest gap between consecutive angles
-        gaps = np.diff(thetas_sorted)
-        
-        # Also check gap wrapping from last to first
-        wrap_gap = (thetas_sorted[0] + 2*np.pi) - thetas_sorted[-1]
-        
-        # Find location of largest gap
-        if wrap_gap >= np.max(gaps):
-            # No wrap-around case
-            return thetas_sorted[0], thetas_sorted[-1]
-        else:
-            # Wrapped case — cut at largest internal gap
-            max_gap_idx = np.argmax(gaps)
-            lower = thetas_sorted[max_gap_idx + 1]
-            upper = thetas_sorted[max_gap_idx]
-            return lower, upper
-
-    def _sample_cell(self, cell: Cell) -> np.ndarray:
-        dim_samples = []
-        for j in range(len(cell.bounds)):
-            a, b = cell.bounds[j]
-            dim_samples.append(np.linspace(a, b, self.samples_per_dim))
-        samples = [np.array(point) for point in product(*dim_samples)]
-        return np.array(samples)
-
-    def compute_reachable_set(self, cell: Cell, action) -> np.ndarray:
-        """Return bounding box [dim, 2] of reachable states."""
-        samples = self._sample_cell(cell)
-        next_states = np.array([self.env.dynamics(s, action) for s in samples])
-
-        reach_bounds = np.zeros((self.env.get_state_dim(), 2))
-
-        # Cartesian dimensions: simple min/max
-        reach_bounds[0, 0] = np.min(next_states[:, 0])
-        reach_bounds[0, 1] = np.max(next_states[:, 0])
-        reach_bounds[1, 0] = np.min(next_states[:, 1])
-        reach_bounds[1, 1] = np.max(next_states[:, 1])
-
-        # Angular dimension (θ): handle wraparound
-        lower, upper = self._compute_theta_bounds(next_states[:, 2])
-        reach_bounds[2, 0] = lower
-        reach_bounds[2, 1] = upper
-        
-        return reach_bounds
-
-    def compute_successor_cells(self, cell: Cell, action, cell_tree: CellTree) -> List[Cell]:
-        reach_bounds = self.compute_reachable_set(cell, action)
-        
-        # Check if theta wraps around
-        theta_wraps = reach_bounds[2, 1] < reach_bounds[2, 0]
-        
-        successors = []
-        for candidate in cell_tree.get_leaves():
-            # Check x, y intersection (normal)
-            if (candidate.bounds[0, 1] < reach_bounds[0, 0] or 
-                candidate.bounds[0, 0] > reach_bounds[0, 1]):
-                continue
-            if (candidate.bounds[1, 1] < reach_bounds[1, 0] or 
-                candidate.bounds[1, 0] > reach_bounds[1, 1]):
-                continue
-            
-            # Check theta intersection (handle wraparound)
-            cand_theta_min = candidate.bounds[2, 0]
-            cand_theta_max = candidate.bounds[2, 1]
-            reach_theta_min = reach_bounds[2, 0]
-            reach_theta_max = reach_bounds[2, 1]
-            
-            if theta_wraps:
-                # Reachable set wraps: [reach_min, π] ∪ [-π, reach_max]
-                # Candidate intersects if it overlaps either part
-                overlaps = (cand_theta_max >= reach_theta_min or 
-                           cand_theta_min <= reach_theta_max)
-            else:
-                # Normal case: [reach_min, reach_max]
-                overlaps = not (cand_theta_max < reach_theta_min or 
-                              cand_theta_min > reach_theta_max)
-            
-            if overlaps:
-                successors.append(candidate)
-        
-        return successors
-
-
-class LipschitzReachabilityAnalyzer(ReachabilityAnalyzer):
-    """Enhanced reachability using Lipschitz bounds."""
-
-    def compute_reachable_set(self, cell: Cell, action) -> np.ndarray:
-        center = cell.center
-        center_next = self.env.dynamics(center, action)
-
-        L_f, _ = self.env.get_lipschitz_constants()
-        r = 0.5 * cell.get_max_range() #eta/2
-        expansion = L_f * r
-
-        reach_bounds = np.zeros((self.env.get_state_dim(), 2))
-
-        # Cartesian coordinates: simple expansion
-        reach_bounds[0, :] = [center_next[0] - expansion, center_next[0] + expansion]
-        reach_bounds[1, :] = [center_next[1] - expansion, center_next[1] + expansion]
-
-        # θ: expand symmetrically, then check if it wraps
-        theta_lower = center_next[2] - expansion
-        theta_upper = center_next[2] + expansion
-        
-        # Clamp to [-π, π] and check for wraparound
-        if theta_upper - theta_lower >= 2*np.pi:
-            # Expansion covers entire circle
-            reach_bounds[2, :] = [-np.pi, np.pi]
-        elif theta_lower < -np.pi:
-            # Wraps around -π
-            reach_bounds[2, 0] = theta_lower + 2*np.pi  # Wrap to positive
-            reach_bounds[2, 1] = theta_upper
-        elif theta_upper > np.pi:
-            # Wraps around +π
-            reach_bounds[2, 0] = theta_lower
-            reach_bounds[2, 1] = theta_upper - 2*np.pi  # Wrap to negative
-        else:
-            # No wraparound
-            reach_bounds[2, :] = [theta_lower, theta_upper]
-
-        return reach_bounds
-    
-class CenterOnlyReachabilityAnalyzer(ReachabilityAnalyzer):
-    """
-    Simplest reachability: only use cell center with one dynamics step.
-    No sampling, no bounds expansion - just check which cell contains the next center.
-    
-    This is INCORRECT but useful for debugging.
-    """
-    
-    def compute_reachable_set(self, cell: Cell, action) -> np.ndarray:
-        """
-        For compatibility, return a point-set around the next center.
-        Not actually used by compute_successor_cells above.
-        """
-        center_next = self.env.dynamics(cell.center, action)
-        
-        # Return a tiny box around the next center
-        eps = 0.2
-        reach_bounds = np.zeros((self.env.get_state_dim(), 2))
-        
-        # Cartesian dimensions (x, y)
-        for dim in range(2):
-            reach_bounds[dim, :] = [center_next[dim] - eps, center_next[dim] + eps]
-        
-        # Angular dimension (theta) - handle wraparound
-        theta = center_next[2]
-        theta_lower = theta - eps
-        theta_upper = theta + eps
-        
-        # Since eps is tiny, wraparound is unlikely but handle it:
-        if theta_lower < -np.pi:
-            theta_lower = theta_lower + 2*np.pi
-        if theta_upper > np.pi:
-            theta_upper = theta_upper - 2*np.pi
-        
-        reach_bounds[2, :] = [theta_lower, theta_upper]
-        
-        return reach_bounds
 class GronwallReachabilityAnalyzer:
     """
     Reachability using Grönwall's inequality: expansion = r * e^(Lt)
     
-    Theory:
-    -------
-    For Lipschitz continuous dynamics with constant L, starting from 
-    a ball B_r(x₀), the reachable set after time t satisfies:
-    
-        Φ_t(B_r(x₀)) ⊆ B_{r·e^(Lt)}(Φ_t(x₀))
-    
-    This accounts for exponential trajectory divergence during integration.
-    
-    Steps:
-    ------
-    1. Compute cell radius r (half of max range)
-    2. Propagate cell center: center_next = f(center, action)
-    3. Compute expansion: ε = r * e^(Lt)
-    4. Reachable bounds: [center_next - ε, center_next + ε]
+    FIXED: Uses robust angle interval handling without wraparound logic.
     """
     
     def __init__(self, env, use_infinity_norm: bool = True):
@@ -463,20 +262,87 @@ class GronwallReachabilityAnalyzer:
         print(f"  Norm type: {'∞-norm (max)' if use_infinity_norm else '2-norm (Euclidean)'}")
         
         # Compare to simple Lipschitz
-        simple_factor = 1 + self.L * self.dt  # First-order approximation
+        simple_factor = 1 + self.L * self.dt
         print(f"  Simple Lipschitz would use: {simple_factor:.6f}")
         print(f"  Grönwall is {100*(self.growth_factor/simple_factor - 1):.2f}% larger (correct!)")
+    
+    @staticmethod
+    def fix_angle_interval(left_angle: float, right_angle: float) -> Tuple[float, float]:
+        """
+        Normalize an angle interval to a canonical form.
+        
+        This function ensures:
+        1. right_angle >= left_angle (unwrap if needed)
+        2. If interval spans full circle, return [-π, π]
+        3. Otherwise, shift interval to be centered around [-π, π]
+        
+        Based on professor's implementation.
+        
+        Args:
+            left_angle: Lower bound of angle interval
+            right_angle: Upper bound of angle interval
+            
+        Returns:
+            Tuple (normalized_left, normalized_right)
+        """
+        # Handle degenerate case (almost point interval)
+        if abs(right_angle - left_angle) < 0.001:
+            left_angle = right_angle - 0.01
+        
+        # Unwrap: ensure right >= left
+        while right_angle < left_angle:
+            right_angle += 2 * np.pi
+        
+        # Full circle case
+        if right_angle - left_angle >= 2 * np.pi - 0.01:
+            return -np.pi, np.pi
+        
+        # Shift interval to avoid being too far from [-π, π]
+        # Move up if both are too negative
+        while left_angle < -np.pi or right_angle < -np.pi:
+            left_angle += 2 * np.pi
+            right_angle += 2 * np.pi
+        
+        # Move down if both are too positive
+        while left_angle > 3 * np.pi or right_angle > 3 * np.pi:
+            left_angle -= 2 * np.pi
+            right_angle -= 2 * np.pi
+        
+        # Final shift: if both > π, bring down
+        while left_angle > np.pi and right_angle > np.pi:
+            left_angle -= 2 * np.pi
+            right_angle -= 2 * np.pi
+        
+        return left_angle, right_angle
+    
+    @staticmethod
+    def intervals_intersect(a_left: float, a_right: float, 
+                          b_left: float, b_right: float) -> bool:
+        """
+        Check if two angle intervals intersect.
+        
+        IMPORTANT: Assumes both intervals are already normalized via fix_angle_interval.
+        This means right >= left for both intervals (possibly with 2π unwrapping).
+        
+        The intersection logic is now simple:
+        - No intersection if: a_right < b_left OR b_right < a_left
+        - Otherwise: they intersect
+        
+        Args:
+            a_left, a_right: First interval [a_left, a_right]
+            b_left, b_right: Second interval [b_left, b_right]
+            
+        Returns:
+            True if intervals overlap, False otherwise
+        """
+        # After normalization, intervals don't wrap, so standard interval logic works
+        return not (a_right < b_left or b_right < a_left)
     
     def compute_reachable_set(self, cell, action) -> np.ndarray:
         """
         Compute reachable set bounds using r * e^(Lt).
         
-        Algorithm:
-        ----------
-        1. Get cell center and compute radius r
-        2. Propagate center: x_next = f(x_center, u)
-        3. Compute expansion: ε = r * e^(Lt)
-        4. Return bounds: [x_next - ε, x_next + ε] for each dimension
+        FIXED: Uses fix_angle_interval for theta instead of manual wraparound logic.
         
         Returns:
             reach_bounds: [dim, 2] array of [min, max] for each dimension
@@ -486,10 +352,8 @@ class GronwallReachabilityAnalyzer:
         
         # Step 2: Compute cell radius r
         if self.use_infinity_norm:
-            # ∞-norm: r = max_j (range_j / 2) = η/2
-            r = 0.5 * cell.get_max_range() #similar to eta/2
+            r = 0.5 * cell.get_max_range()
         else:
-            # 2-norm: r = ||[η_1/2, η_2/2, η_3/2]||_2
             ranges = np.array([cell.get_range(j) for j in range(len(cell.bounds))])
             r = 0.5 * np.linalg.norm(ranges)
         
@@ -506,24 +370,13 @@ class GronwallReachabilityAnalyzer:
         reach_bounds[0, :] = [center_next[0] - expansion, center_next[0] + expansion]
         reach_bounds[1, :] = [center_next[1] - expansion, center_next[1] + expansion]
         
-        # For θ (angular coordinate): handle wraparound at ±π
+        # For θ (angular coordinate): use fix_angle_interval
         theta_lower = center_next[2] - expansion
         theta_upper = center_next[2] + expansion
         
-        # Case 1: Expansion covers full circle
-        if theta_upper - theta_lower >= 2*np.pi:
-            reach_bounds[2, :] = [-np.pi, np.pi]
-        # Case 2: Wraps around -π
-        elif theta_lower < -np.pi:
-            reach_bounds[2, 0] = theta_lower + 2*np.pi  # Map to positive
-            reach_bounds[2, 1] = theta_upper
-        # Case 3: Wraps around +π
-        elif theta_upper > np.pi:
-            reach_bounds[2, 0] = theta_lower
-            reach_bounds[2, 1] = theta_upper - 2*np.pi  # Map to negative
-        # Case 4: No wraparound
-        else:
-            reach_bounds[2, :] = [theta_lower, theta_upper]
+        # Normalize the angle interval
+        theta_lower, theta_upper = self.fix_angle_interval(theta_lower, theta_upper)
+        reach_bounds[2, :] = [theta_lower, theta_upper]
         
         return reach_bounds
     
@@ -531,61 +384,49 @@ class GronwallReachabilityAnalyzer:
         """
         Find all cells that intersect the reachable set.
         
-        Algorithm:
-        ----------
-        1. Compute reachable bounds using compute_reachable_set()
-        2. For each leaf cell in the tree:
-            a. Check if x-ranges overlap
-            b. Check if y-ranges overlap
-            c. Check if θ-ranges overlap (handle wraparound)
-        3. Return cells that overlap in ALL dimensions
+        FIXED: Simplified theta intersection using normalized intervals.
+        No more wraparound detection needed!
         
         Returns:
             List of successor cells
         """
-        # Step 1: Get reachable bounds
+        # Step 1: Get reachable bounds (already normalized)
         reach_bounds = self.compute_reachable_set(cell, action)
-        
-        # Check if theta interval wraps around ±π
-        theta_wraps = reach_bounds[2, 1] < reach_bounds[2, 0]
         
         successors = []
         
         # Step 2: Check each leaf cell for intersection
         for candidate in cell_tree.get_leaves():
-            # Step 2a: Check x-coordinate overlap
-            # No overlap if: candidate_max < reach_min OR candidate_min > reach_max
+            # Step 2a: Check x-coordinate overlap (standard interval)
             if (candidate.bounds[0, 1] < reach_bounds[0, 0] or 
                 candidate.bounds[0, 0] > reach_bounds[0, 1]):
-                continue  # Skip this cell
+                continue
             
-            # Step 2b: Check y-coordinate overlap
+            # Step 2b: Check y-coordinate overlap (standard interval)
             if (candidate.bounds[1, 1] < reach_bounds[1, 0] or 
                 candidate.bounds[1, 0] > reach_bounds[1, 1]):
-                continue  # Skip this cell
+                continue
             
-            # Step 2c: Check θ-coordinate overlap (special case for wraparound)
-            cand_theta_min = candidate.bounds[2, 0]
-            cand_theta_max = candidate.bounds[2, 1]
-            reach_theta_min = reach_bounds[2, 0]
-            reach_theta_max = reach_bounds[2, 1]
+            # Step 2c: Check θ-coordinate overlap using normalized intervals
+            # Normalize both intervals first
+            cand_theta_left, cand_theta_right = self.fix_angle_interval(
+                candidate.bounds[2, 0], 
+                candidate.bounds[2, 1]
+            )
+            reach_theta_left = reach_bounds[2, 0]
+            reach_theta_right = reach_bounds[2, 1]
             
-            if theta_wraps:
-                # Reachable set is [reach_min, π] ∪ [-π, reach_max]
-                # Overlap if candidate touches either part
-                overlaps = (cand_theta_max >= reach_theta_min or 
-                           cand_theta_min <= reach_theta_max)
-            else:
-                # Normal interval: [reach_min, reach_max]
-                overlaps = not (cand_theta_max < reach_theta_min or 
-                              cand_theta_min > reach_theta_max)
+            # Check intersection using normalized intervals
+            if not self.intervals_intersect(
+                cand_theta_left, cand_theta_right,
+                reach_theta_left, reach_theta_right
+            ):
+                continue
             
             # Step 3: Add to successors if all dimensions overlap
-            if overlaps:
-                successors.append(candidate)
+            successors.append(candidate)
         
         return successors
-    
 # ============================================================================
 # PART 4: VALUE ITERATION (ALGORITHM 1 - FIXED)
 # ============================================================================
@@ -598,7 +439,7 @@ class SafetyValueIterator:
     """
     
     def __init__(self, env: Environment, gamma: float, cell_tree: CellTree,
-                 reachability: ReachabilityAnalyzer, output_dir: Optional[str] = None):
+                 reachability: GronwallReachabilityAnalyzer, output_dir: Optional[str] = None):
         self.env = env
         self.gamma = gamma
         self.cell_tree = cell_tree
@@ -868,7 +709,7 @@ class AdaptiveRefinement:
     """
     
     def __init__(self,args, env: Environment, gamma: float, cell_tree: CellTree,
-                 reachability: ReachabilityAnalyzer, output_dir: str = None):
+                 reachability: GronwallReachabilityAnalyzer, output_dir: str = None):
         self.env = env
         self.gamma = gamma
         self.cell_tree = cell_tree
@@ -1130,8 +971,6 @@ def plot_value_function(
     plt.tight_layout()
     plt.savefig(filename, dpi=150, bbox_inches='tight')
     plt.close()
-
-
 def _plot_slice(
     env: Environment,
     cell_tree: CellTree,
@@ -1141,78 +980,106 @@ def _plot_slice(
     upper: bool
 ):
     """
-    FIXED: Uses get_cell_containing_point to find correct leaf cell.
+    Plot value function by directly coloring leaf cells.
+    
+    FIXED: No more 80x80 sampling grid - directly use leaf cell values.
+    Only plots cells whose theta range includes the current slice.
     """
     bounds = env.get_state_bounds()
     x_min, x_max = bounds[0]
     y_min, y_max = bounds[1]
     
-    # Create dense grid for smooth visualization
-    resolution = 80
-    x_grid = np.linspace(x_min, x_max, resolution)
-    y_grid = np.linspace(y_min, y_max, resolution)
-    X, Y = np.meshgrid(x_grid, y_grid)
+    # Collect values from all relevant cells to determine color scale
+    values = []
+    relevant_cells = []
     
-   
-    V = np.full_like(X, np.nan, dtype=float)
-    for i in range(resolution):
-        for j in range(resolution):
-            state = np.array([X[i, j], Y[i, j], theta])
-            cell = cell_tree.get_cell_containing_point(state)  # leaf traversal!
-            
-            if cell is not None:
-                if upper and cell.V_upper is not None:
-                    V[i, j] = cell.V_upper
-                elif not upper and cell.V_lower is not None:
-                    V[i, j] = cell.V_lower
-    
-    # Filled contour for smooth background
-    im = ax.contourf(X, Y, V, levels=20, cmap='RdYlGn', alpha=0.75)
-    
-    # Draw zero level set (safety boundary)
-    ax.contour(X, Y, V, levels=[0.0], colors='black', linewidths=2.5)
-    
-    # # Draw cell boundaries (only leaf cells)
-    # for cell in cell_tree.get_leaves():
-    #     a_x, b_x = cell.bounds[0]
-    #     a_y, b_y = cell.bounds[1]
-    #     rect = Rectangle(
-    #         (a_x, a_y),
-    #         b_x - a_x,
-    #         b_y - a_y,
-    #         fill=False,
-    #         edgecolor='black',
-    #         linewidth=0.5,
-    #         alpha=0.8
-    #     )
-    #     ax.add_patch(rect)
-    # Draw only cells whose θ-range includes this slice
     for cell in cell_tree.get_leaves():
+        # Only consider cells whose theta range includes this slice
         theta_min, theta_max = cell.bounds[2]
         if not (theta_min <= theta <= theta_max):
-            continue  # skip cells outside current θ slice
+            continue
         
+        if upper and cell.V_upper is not None:
+            values.append(cell.V_upper)
+            relevant_cells.append((cell, cell.V_upper))
+        elif not upper and cell.V_lower is not None:
+            values.append(cell.V_lower)
+            relevant_cells.append((cell, cell.V_lower))
+    
+    if not values:
+        ax.text(0.5, 0.5, 'No data for this slice', 
+                transform=ax.transAxes, ha='center', va='center')
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+        return
+    
+    # Determine color scale
+    vmin = min(values)
+    vmax = max(values)
+    
+    # Use a diverging colormap centered at 0 (safe/unsafe boundary)
+    from matplotlib.colors import TwoSlopeNorm, Normalize
+    cmap = plt.cm.RdYlGn
+    
+    # Handle edge cases for TwoSlopeNorm
+    # TwoSlopeNorm requires: vmin < vcenter < vmax (strict inequalities)
+    epsilon = 1e-6  # Small value to ensure strict inequalities
+    
+    if abs(vmax - vmin) < 1e-10:
+        # All values are essentially the same
+        if abs(vmin) < 1e-10:
+            # All values are ~0
+            norm = Normalize(vmin=-0.1, vmax=0.1)
+        else:
+            # All values are the same non-zero value
+            norm = Normalize(vmin=vmin-0.1*abs(vmin), vmax=vmax+0.1*abs(vmax))
+    elif vmin > 0:
+        # All values are strictly positive
+        norm = TwoSlopeNorm(vmin=0, vcenter=max(0, vmin-epsilon), vmax=vmax)
+    elif vmax < 0:
+        # All values are strictly negative
+        norm = TwoSlopeNorm(vmin=vmin, vcenter=min(0, vmax+epsilon), vmax=0)
+    elif vmin == 0 and vmax > 0:
+        # Values in [0, vmax]
+        norm = TwoSlopeNorm(vmin=0, vcenter=epsilon, vmax=vmax)
+    elif vmin < 0 and vmax == 0:
+        # Values in [vmin, 0]
+        norm = TwoSlopeNorm(vmin=vmin, vcenter=-epsilon, vmax=0)
+    elif vmin == 0 and vmax == 0:
+        # All values are exactly 0
+        norm = Normalize(vmin=-0.1, vmax=0.1)
+    else:
+        # Values span zero properly (vmin < 0 < vmax)
+        norm = TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
+    
+    # Plot each cell as a colored rectangle
+    for cell, value in relevant_cells:
         a_x, b_x = cell.bounds[0]
         a_y, b_y = cell.bounds[1]
+        
+        color = cmap(norm(value))
+        
         rect = Rectangle(
             (a_x, a_y),
             b_x - a_x,
             b_y - a_y,
-            fill=False,
+            facecolor=color,
             edgecolor='black',
-            linewidth=0.5,
-            alpha=0.8
+            linewidth=0.3,
+            alpha=0.9
         )
         ax.add_patch(rect)
-
+    
     # Draw obstacle
     if isinstance(env, DubinsCarEnvironment):
         obstacle = Circle(
             env.obstacle_position,
             env.obstacle_radius,
             color='red',
-            alpha=0.5,
-            zorder=10
+            alpha=0.6,
+            edgecolor='darkred',
+            linewidth=2,
+            zorder=15
         )
         ax.add_patch(obstacle)
     
@@ -1221,10 +1088,32 @@ def _plot_slice(
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
     ax.set_aspect('equal')
-    ax.grid(True, alpha=0.2)
-    plt.colorbar(im, ax=ax).set_label(label)
-
-
+    ax.grid(False)
+    
+    # Add colorbar with explicit ticks
+    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    
+    # Create colorbar
+    cbar = plt.colorbar(sm, ax=ax, label=label)
+    
+    # Set explicit tick locations to ensure labels appear
+    # Always include min, 0, and max
+    if vmin < 0 and vmax > 0:
+        # Spanning zero
+        tick_vals = [vmin, vmin/2, 0, vmax/2, vmax]
+    elif vmin >= 0:
+        # All non-negative
+        tick_vals = [0, vmax/3, 2*vmax/3, vmax]
+    elif vmax <= 0:
+        # All non-positive
+        tick_vals = [vmin, 2*vmin/3, vmin/3, 0]
+    else:
+        # Fallback
+        tick_vals = [vmin, 0, vmax]
+    
+    cbar.set_ticks(tick_vals)
+    cbar.set_ticklabels([f'{v:.3f}' for v in tick_vals])
 def _plot_classification_slice(
     env: Environment,
     cell_tree: CellTree,
@@ -1232,10 +1121,9 @@ def _plot_classification_slice(
     ax
 ):
     """
-    FIXED: Uses tree traversal to properly classify cells after refinement.
+    Plot cell classification by directly coloring leaf cells.
     
-    For each (x,y) point in the visualization, finds the actual leaf cell
-    containing [x, y, theta] and uses its classification.
+    FIXED: No more 80x80 sampling grid - directly use leaf cells.
     """
     bounds = env.get_state_bounds()
     x_min, x_max = bounds[0]
@@ -1245,61 +1133,36 @@ def _plot_classification_slice(
     C_UNSAFE = "#d62728"  # Red
     C_SAFE = "#2ca02c"    # Green
     C_BOUND = "#7f7f7f"   # Gray
+    C_UNKNOWN = "#ffffff"  # White (for cells without values)
     
-    # Create classification grid
-    resolution = 80
-    x_grid = np.linspace(x_min, x_max, resolution)
-    y_grid = np.linspace(y_min, y_max, resolution)
-    
-    # For each point, find the leaf cell and get classification
-    classification = np.full((resolution, resolution), -1, dtype=int)  # -1 = no cell
-    
-    for i in range(resolution):
-        for j in range(resolution):
-            state = np.array([x_grid[j], y_grid[i], theta])
-            cell = cell_tree.get_cell_containing_point(state)  # leef traversal!
-            
-            if cell is not None and cell.V_upper is not None and cell.V_lower is not None:
-                if cell.V_lower > 0 and cell.V_upper > 0:
-                    classification[i, j] = 2  # Safe
-                elif cell.V_lower < 0 and cell.V_upper < 0:
-                    classification[i, j] = 0  # Unsafe
-                else:
-                    classification[i, j] = 1  # Boundary
-    
-    # Create custom colormap
-    from matplotlib.colors import ListedColormap
-    cmap = ListedColormap([C_UNSAFE, C_BOUND, C_SAFE])
-    
-    # Plot classification
-    im = ax.imshow(
-        classification,
-        extent=[x_min, x_max, y_min, y_max],
-        origin='lower',
-        cmap=cmap,
-        vmin=0,
-        vmax=2,
-        aspect='auto',
-        alpha=0.9
-    )
-    # Draw cell boundaries only for cells containing this θ slice
+    # Plot each cell directly
     for cell in cell_tree.get_leaves():
+        # Only plot cells whose theta range includes this slice
         theta_min, theta_max = cell.bounds[2]
         if not (theta_min <= theta <= theta_max):
-            
-            continue  # skip irrelevant θ intervals
+            continue
         
+        # Determine cell color based on classification
+        if cell.V_upper is None or cell.V_lower is None:
+            color = C_UNKNOWN
+        elif cell.V_lower > 0:
+            color = C_SAFE
+        elif cell.V_upper < 0:
+            color = C_UNSAFE
+        else:
+            color = C_BOUND
+        
+        # Draw colored rectangle
         rect = Rectangle(
             (cell.bounds[0, 0], cell.bounds[1, 0]),
             cell.get_range(0),
             cell.get_range(1),
-            facecolor='none',
-            edgecolor="black",
+            facecolor=color,
+            edgecolor='black',
             linewidth=0.4,
-            alpha=0.8
+            alpha=0.9
         )
         ax.add_patch(rect)
-
     
     # Draw obstacle
     if isinstance(env, DubinsCarEnvironment):
@@ -1307,7 +1170,9 @@ def _plot_classification_slice(
             env.obstacle_position,
             env.obstacle_radius,
             color='red',
-            alpha=0.5,
+            alpha=0.6,
+            edgecolor='darkred',
+            linewidth=2,
             zorder=10
         )
         ax.add_patch(obstacle)
@@ -1317,7 +1182,7 @@ def _plot_classification_slice(
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
     ax.set_aspect('equal')
-    ax.grid(True, alpha=0.2)
+    ax.grid(False)
     
     # Legend
     legend_elems = [
@@ -1326,8 +1191,6 @@ def _plot_classification_slice(
         Patch(facecolor=C_BOUND, edgecolor='black', label='Boundary (mixed)')
     ]
     ax.legend(handles=legend_elems, loc='upper right', fontsize=8, framealpha=0.9)
-
-
 def plot_convergence(
     conv_upper: np.ndarray,
     conv_lower: np.ndarray,
@@ -1380,7 +1243,7 @@ def plot_reachability_single_cell(
     ax.set_xlim(bounds[0])
     ax.set_ylim(bounds[1])
     ax.set_aspect('equal')
-    ax.grid(True, alpha=0.2)
+    # ax.grid(True, alpha=0.2)
     ax.set_title(
         f"Reachable cells from cell #{cell_idx} "
         f"(θ={theta_center:.2f} rad, {np.degrees(theta_center):.1f}°)"
@@ -1564,7 +1427,7 @@ def plot_reachability_grid(
         ax.set_xlim(bounds[0])
         ax.set_ylim(bounds[1])
         ax.set_aspect('equal')
-        ax.grid(True, alpha=0.2)
+        # ax.grid(True, alpha=0.2)
         ax.set_title(
             f"Cell #{cell_idx} (θ={np.degrees(theta_center):.0f}°)",
             fontsize=10
@@ -1720,7 +1583,7 @@ def plot_failure_function_bounds(
         ax.set_ylim(y_min, y_max)
         ax.set_aspect('equal')
         ax.set_title(title)
-        ax.grid(True, alpha=0.3)
+        # ax.grid(True, alpha=0.3)
         
         sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
         cbar = plt.colorbar(sm, ax=ax)
@@ -1882,7 +1745,7 @@ def compute_ground_truth_reachability(
         ax.set_ylim(bounds[1, 0], bounds[1, 1])
         ax.set_aspect('equal')
         ax.set_title(f'Ground Truth (θ={theta_slice:.2f} rad, {np.degrees(theta_slice):.0f}°)')
-        ax.grid(True, alpha=0.3, color='white', linewidth=0.5)
+        # ax.grid(True, alpha=0.3, color='white', linewidth=0.5)
         
         # Add colorbar
         cbar = plt.colorbar(im, ax=ax)
