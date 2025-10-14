@@ -81,7 +81,7 @@ class DubinsCarEnvironment(Environment):
             
         self.obstacle_radius = obstacle_radius
         self.L_f = 1.0 + v_const * dt
-        self.L_l = 1.0
+        self.L_l = np.sqrt(2)
         self.actions = [-1.0, 0.0, 1.0]
     
     def get_state_bounds(self) -> np.ndarray:
@@ -451,9 +451,12 @@ class GronwallReachabilityAnalyzer:
         successors_new = []
         reach_theta_left, reach_theta_right = reach_bounds[2, 0], reach_bounds[2, 1]
         
-        for candidate in candidates:
-            if self._check_theta_intersection(candidate, reach_bounds):
-                successors_new.append(candidate)
+        # for candidate in candidates:###changed this changed this CHECK IF NO NEED TO DO # if self._check_theta_intersection(candidate, reach_bounds):
+        #     if self._check_theta_intersection(candidate, reach_bounds):
+        #         successors_new.append(candidate)
+        for candidate in candidates:###changed this changed this CHECK IF correct
+            # if self._check_theta_intersection(candidate, reach_bounds): #NO NEED TO CHECK SINCE WE ALREADY BOOUND THETA PROPERLY IN THE compute_reachable_set FUNCTION
+            successors_new.append(candidate)
         
         # DEBUG VERIFICATION: Compare with old method
         if self.debug_verify:
@@ -1612,11 +1615,16 @@ def run_algorithm_2(args):
     print("ALGORITHM 2/3: Adaptive Refinement (OPTIMIZED WITH SPATIAL INDEX)")
     print("="*70)
     
+    
     env = DubinsCarEnvironment(
         v_const=args.velocity,
         dt=args.dt,
         obstacle_radius=args.obstacle_radius
     )
+    L_f, L_l = env.get_lipschitz_constants()
+    if args.gamma * L_f >= 1:
+        print("gamma:  ", args.gamma)
+        raise ValueError(f"Contraction condition violated: γL_f = {args.gamma * L_f} >= 1")
     
     print(f"\nEnvironment: Dubins Car")
     print(f"  Velocity: {args.velocity}")
@@ -1766,7 +1774,7 @@ if __name__ == "__main__":
     main()
     
     # Example usage:
-    # python safety_value_function_5.py --algorithm 2 --initial-resolution 1 --gamma 0.05 --dt 0.05 --debug-verify
+    # python safety_value_function_4_ris_all_leaves_optimized_new.py --algorithm 2 --initial-resolution 1 --gamma 0.05 --dt 0.05 --debug-verify
     # 
     # After verifying correctness, run without debug for full speed:
-    # python safety_value_function_5.py --algorithm 2 --initial-resolution 1 --gamma 0.05 --dt 0.05
+    # python safety_value_function_4_ris_all_leaves_optimized_new.py --algorithm 2 --initial-resolution 1 --gamma 0.05 --dt 0.05

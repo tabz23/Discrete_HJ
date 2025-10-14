@@ -786,8 +786,17 @@ class AdaptiveRefinement:
         self.args = args
         
         if output_dir is None:
-            rname = type(reachability).__name__
-            output_dir = f"./results_adaptive/{rname}"
+            
+            param_suffix = (
+                f"gamma_{gamma:.3f}_"
+                f"dt_{env.dt:.3f}_"
+                f"tol_{args.tolerance:.1e}_"
+                f"eps_{args.epsilon:.3f}"
+            )
+            output_dir = os.path.join(
+                "./results_adaptive_4",
+                f"_{param_suffix}"
+            )
         self.output_dir = output_dir
         
         self.value_iterator = SafetyValueIterator(
@@ -825,12 +834,12 @@ class AdaptiveRefinement:
         filename = os.path.join(self.output_dir, "value_function_phase_0_complete.png")
         plot_value_function(self.env, self.cell_tree, filename, 0)
         
-        # Plot initial l bounds
-        plot_failure_function_bounds(
-            self.env, self.cell_tree,
-            filename_prefix="ell_bounds_phase_0",
-            save_dir=self.output_dir
-        )
+        # # Plot initial l bounds
+        # plot_failure_function_bounds(
+        #     self.env, self.cell_tree,
+        #     filename_prefix="ell_bounds_phase_0",
+        #     save_dir=self.output_dir
+        # )
         
         # Initial queue state
         boundary_cells = self._identify_boundary_cells()
@@ -890,12 +899,12 @@ class AdaptiveRefinement:
                 print(f"\nInitializing {len(new_cells)} new cells...")
                 self.value_iterator.initialize_new_cells(new_cells)
                 
-                # Plot l bounds after refinement
-                plot_failure_function_bounds(
-                    self.env, self.cell_tree,
-                    filename_prefix=f"ell_bounds_phase_{refinement_iter + 1}",
-                    save_dir=self.output_dir
-                )
+                # # Plot l bounds after refinement
+                # plot_failure_function_bounds(
+                #     self.env, self.cell_tree,
+                #     filename_prefix=f"ell_bounds_phase_{refinement_iter + 1}",
+                #     save_dir=self.output_dir
+                # )
             
             # Set refinement phase BEFORE LOCAL VI
             self.value_iterator.refinement_phase = refinement_iter + 1
@@ -948,12 +957,12 @@ class AdaptiveRefinement:
         
         self._print_statistics()
         
-        # Final plots
-        plot_failure_function_bounds(
-            self.env, self.cell_tree,
-            filename_prefix="ell_bounds_FINAL",
-            save_dir=self.output_dir
-        )
+        # # Final plots
+        # plot_failure_function_bounds(
+        #     self.env, self.cell_tree,
+        #     filename_prefix="ell_bounds_FINAL",
+        #     save_dir=self.output_dir
+        # )
         
         print(f"\n✓ All results saved to: {self.output_dir}/")
     
@@ -1149,7 +1158,7 @@ def _plot_slice(
         tick_vals = [vmin, 0, vmax]
     
     cbar.set_ticks(tick_vals)
-    cbar.set_ticklabels([f'{v:.3f}' for v in tick_vals])
+    cbar.set_ticklabels([f'{v:.10f}' for v in tick_vals])
 
 
 def _plot_classification_slice(
@@ -1589,9 +1598,18 @@ def run_algorithm_2(args):
     )
     print("  Using Grönwall-based reachability (exponential growth via e^(Lt))")
     
-    rname = type(reachability).__name__
-    output_dir = f"./results_adaptive_4/{rname}"
     
+    param_suffix = (
+            f"gamma_{args.gamma:.3f}_"
+            f"dt_{env.dt:.3f}_"
+            f"tol_{args.tolerance:.1e}_"
+            f"eps_{args.epsilon:.3f}"
+        )
+    output_dir = os.path.join(
+            "./results_adaptive_optimized",
+            f"_{param_suffix}"
+        )
+
     adaptive = AdaptiveRefinement(
         args,
         env=env,
@@ -1681,6 +1699,7 @@ def main():
     # Set default workers if not specified
     if args.workers is None:
         args.workers = max(1, cpu_count() - 1)
+        print("workers")
     
     # Generate ground truth if requested
     if args.plot_FT_HJ:
