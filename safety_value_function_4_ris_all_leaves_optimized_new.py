@@ -168,26 +168,30 @@ class DubinsCarEnvironment(Environment):
     
     def get_state_dim(self) -> int:
         return 3
-    def dynamics(self, state: np.ndarray, action: float) -> np.ndarray:
-        """
-        Compute next state using odeint for accurate integration.
+    
+    
+    
+    
+    # def dynamics(self, state: np.ndarray, action: float) -> np.ndarray:
+    #     """
+    #     Compute next state using odeint for accurate integration.
         
-        Args:
-            state: current state [x, y, theta]
-            action: control input (angular velocity)
+    #     Args:
+    #         state: current state [x, y, theta]
+    #         action: control input (angular velocity)
         
-        Returns:
-            next_state: state after time dt
-        """
-        x, y, theta = state
-        dtheta = action
+    #     Returns:
+    #         next_state: state after time dt
+    #     """
+    #     x, y, theta = state
+    #     dtheta = action
         
-        x_next = x + self.v_const * np.cos(theta) * self.dt
-        y_next = y + self.v_const * np.sin(theta) * self.dt
-        theta_next = theta + dtheta * self.dt
-        theta_next = np.arctan2(np.sin(theta_next), np.cos(theta_next))
+    #     x_next = x + self.v_const * np.cos(theta) * self.dt
+    #     y_next = y + self.v_const * np.sin(theta) * self.dt
+    #     theta_next = theta + dtheta * self.dt
+    #     theta_next = np.arctan2(np.sin(theta_next), np.cos(theta_next))
         
-        return np.array([x_next, y_next, theta_next])
+    #     return np.array([x_next, y_next, theta_next])
 # from scipy.integrate import odeint
 # from scipy.integrate import solve_ivp
 # import numpy as np
