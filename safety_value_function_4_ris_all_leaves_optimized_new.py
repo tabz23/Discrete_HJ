@@ -60,6 +60,8 @@ class Environment(ABC):
         pass
 
 
+from scipy.integrate import odeint
+
 class DubinsCarEnvironment(Environment):
     """Dubins car with constant velocity navigating around a circular obstacle."""
     
@@ -80,7 +82,12 @@ class DubinsCarEnvironment(Environment):
             self.obstacle_position = obstacle_position
             
         self.obstacle_radius = obstacle_radius
-        self.L_f = 1.0 + v_const * dt
+        
+        # Lipschitz constants need to be updated for odeint
+        # For Dubins car: ||f(x,u) - f(x',u)|| <= L_f ||x - x'||
+        # The dynamics have bounded derivatives, so we can bound L_f
+        # For small dt and bounded velocity, L_f ≈ 1 + v_const * dt is still reasonable
+        self.L_f  = v_const    #  1.0 + v_const * dt changed to V_const after using odeint
         self.L_l = np.sqrt(2)
         self.actions = [-1.0, 0.0, 1.0]
     
@@ -90,7 +97,88 @@ class DubinsCarEnvironment(Environment):
     def get_action_space(self) -> List:
         return self.actions
     
+    def _dubins_ode(self, state: np.ndarray, t: float, action: float) -> np.ndarray:
+        """
+        ODE system for Dubins car dynamics.
+        
+        Args:
+            state: [x, y, theta]
+            t: time (not used, but required by odeint)
+            action: angular velocity control
+        
+        Returns:
+            derivatives: [dx/dt, dy/dt, dtheta/dt]
+        """
+        x, y, theta = state
+        
+        dx_dt = self.v_const * np.cos(theta)
+        dy_dt = self.v_const * np.sin(theta)
+        dtheta_dt = action
+        
+        return np.array([dx_dt, dy_dt, dtheta_dt])
+    
     def dynamics(self, state: np.ndarray, action: float) -> np.ndarray:
+        """
+        Compute next state using odeint for accurate integration.
+        
+        Args:
+            state: current state [x, y, theta]
+            action: control input (angular velocity)
+        
+        Returns:
+            next_state: state after time dt
+        """
+        # Time span for integration
+        t_span = [0, self.dt]
+        
+        # Solve ODE using odeint
+        # odeint returns array of shape (2, 3) for 2 time points
+        solution = odeint(self._dubins_ode, state, t_span, args=(action,), atol=1e-12, rtol=1e-12)
+        
+        # Extract final state
+        state_next = solution[-1]
+        
+        # Normalize theta to [-π, π]
+        theta_next = np.arctan2(np.sin(state_next[2]), np.cos(state_next[2]))
+        state_next[2] = theta_next
+        
+        return state_next
+
+    def failure_function(self, state: np.ndarray) -> float:
+        """
+        Failure function: negative inside obstacle, positive outside.
+        
+        Args:
+            state: [x, y, theta]
+        
+        Returns:
+            distance to obstacle boundary (negative = unsafe)
+        """
+        pos = state[:2]
+        dist_to_obstacle = np.linalg.norm(pos - self.obstacle_position)
+        return (dist_to_obstacle - self.obstacle_radius)
+    
+    def get_lipschitz_constants(self) -> Tuple[float, float]:
+        """
+        Returns (L_f, L_l) where:
+        - L_f: Lipschitz constant for dynamics
+        - L_l: Lipschitz constant for failure function
+        """
+        return self.L_f, self.L_l
+    
+    def get_state_dim(self) -> int:
+        return 3
+    def dynamics(self, state: np.ndarray, action: float) -> np.ndarray:
+        """
+        Compute next state using odeint for accurate integration.
+        
+        Args:
+            state: current state [x, y, theta]
+            action: control input (angular velocity)
+        
+        Returns:
+            next_state: state after time dt
+        """
         x, y, theta = state
         dtheta = action
         
@@ -100,18 +188,90 @@ class DubinsCarEnvironment(Environment):
         theta_next = np.arctan2(np.sin(theta_next), np.cos(theta_next))
         
         return np.array([x_next, y_next, theta_next])
-    
-    def failure_function(self, state: np.ndarray) -> float:
-        pos = state[:2]
-        dist_to_obstacle = np.linalg.norm(pos - self.obstacle_position)
-        return (dist_to_obstacle - self.obstacle_radius)
-    
-    def get_lipschitz_constants(self) -> Tuple[float, float]:
-        return self.L_f, self.L_l
-    
-    def get_state_dim(self) -> int:
-        return 3
+# from scipy.integrate import odeint
+# from scipy.integrate import solve_ivp
+# import numpy as np
+# from typing import List, Tuple
 
+# class DubinsCarEnvironment(Environment):
+#     """Dubins car with constant velocity navigating around a circular obstacle."""
+
+#     def __init__(self, v_const: float = 1.0, dt: float = 0.1,
+#                  state_bounds: np.ndarray = None, obstacle_position: np.ndarray = None,
+#                  obstacle_radius: float = 0.5):
+#         self.v_const = v_const
+#         self.dt = dt
+
+#         if state_bounds is None:
+#             self.state_bounds = np.array([[-3.0, 3.0], [-3.0, 3.0], [-np.pi, np.pi]])
+#         else:
+#             self.state_bounds = state_bounds
+
+#         if obstacle_position is None:
+#             self.obstacle_position = np.array([0.0, 0.0])
+#         else:
+#             self.obstacle_position = obstacle_position
+
+#         self.obstacle_radius = obstacle_radius
+
+#         # Lipschitz constants
+#         self.L_f = v_const  + self.dt
+#         self.L_l = np.sqrt(2)
+#         self.actions = [-1.0, 0.0, 1.0]
+
+#     def get_state_bounds(self) -> np.ndarray:
+#         return self.state_bounds
+
+#     def get_action_space(self) -> List:
+#         return self.actions
+
+#     def _dubins_rhs(self, t: float, state: np.ndarray, action: float) -> np.ndarray:
+#         """
+#         RHS of Dubins car dynamics (used by solve_ivp).
+#         """
+#         x, y, theta = state
+#         dx_dt = self.v_const * np.cos(theta)
+#         dy_dt = self.v_const * np.sin(theta)
+#         dtheta_dt = action
+#         return np.array([dx_dt, dy_dt, dtheta_dt])
+
+#     def dynamics(self, state: np.ndarray, action: float) -> np.ndarray:
+#         """
+#         Compute next state using 2nd-order Runge-Kutta (Midpoint Method).
+#         More accurate than Euler, less accurate than RK4.
+#         """
+#         def f(s):
+#             x, y, theta = s
+#             return np.array([
+#                 self.v_const * np.cos(theta),
+#                 self.v_const * np.sin(theta),
+#                 action
+#             ])
+        
+#         h = self.dt
+        
+#         # Midpoint method: y_{n+1} = y_n + h*f(y_n + h/2*f(y_n))
+#         k1 = f(state)
+#         k2 = f(state + h/2 * k1)
+        
+#         state_next = state + h * k2
+        
+#         # Normalize angle
+#         state_next[2] = np.arctan2(np.sin(state_next[2]), np.cos(state_next[2]))
+        
+#         return state_next
+
+#     def failure_function(self, state: np.ndarray) -> float:
+#         """Failure function: negative inside obstacle, positive outside."""
+#         pos = state[:2]
+#         dist_to_obstacle = np.linalg.norm(pos - self.obstacle_position)
+#         return dist_to_obstacle - self.obstacle_radius
+
+#     def get_lipschitz_constants(self) -> Tuple[float, float]:
+#         return self.L_f, self.L_l
+
+#     def get_state_dim(self) -> int:
+#         return 3
 
 # ============================================================================
 # PART 2: CELL STRUCTURE
@@ -451,12 +611,12 @@ class GronwallReachabilityAnalyzer:
         successors_new = []
         reach_theta_left, reach_theta_right = reach_bounds[2, 0], reach_bounds[2, 1]
         
-        # for candidate in candidates:###changed this changed this CHECK IF NO NEED TO DO # if self._check_theta_intersection(candidate, reach_bounds):
-        #     if self._check_theta_intersection(candidate, reach_bounds):
-        #         successors_new.append(candidate)
-        for candidate in candidates:###changed this changed this CHECK IF correct
-            # if self._check_theta_intersection(candidate, reach_bounds): #NO NEED TO CHECK SINCE WE ALREADY BOOUND THETA PROPERLY IN THE compute_reachable_set FUNCTION
-            successors_new.append(candidate)
+        for candidate in candidates:###changed this changed this CHECK IF NO NEED TO DO # if self._check_theta_intersection(candidate, reach_bounds):
+            if self._check_theta_intersection(candidate, reach_bounds):
+                successors_new.append(candidate)
+        # for candidate in candidates:###changed this changed this CHECK IF correct
+        #     # if self._check_theta_intersection(candidate, reach_bounds): #NO NEED TO CHECK SINCE WE ALREADY BOOUND THETA PROPERLY IN THE compute_reachable_set FUNCTION
+        #     successors_new.append(candidate)
         
         # DEBUG VERIFICATION: Compare with old method
         if self.debug_verify:
@@ -922,33 +1082,72 @@ class SafetyValueIterator:
         return np.array(conv_history_upper), np.array(conv_history_lower)
         
     def _update_successor_cache_for_new_cells(self, new_cells: Set[Cell]):
-        """Update successor cache with new cells after refinement using spatial index."""
+        """Update successor cache after refinement - COMPREHENSIVE."""
         if not new_cells:
             return
         
-        print(f"  Updating successor cache for {len(new_cells)} new cells (with spatial index)...")
+        print(f"  Updating successor cache for {len(new_cells)} new cells...")
         start_time = time.time()
         
         actions = self.env.get_action_space()
         
-        # NO LONGER NEED TO SERIALIZE ALL LEAVES - spatial index handles it!
-        # Just compute successors directly using spatial index
-        new_entries = {}
+        # Step 1: Identify refined parent cells
+        refined_parent_ids = set()
         for cell in new_cells:
+            if cell.parent is not None:
+                refined_parent_ids.add(cell.parent.cell_id)
+        
+        print(f"    Identified {len(refined_parent_ids)} refined parents")
+        
+        # Step 2: Remove all cache entries involving refined parents
+        keys_to_delete = []
+        for key in self.successor_cache.keys():
+            cell_id, action = key
+            successor_ids = self.successor_cache[key]
+            
+            # Remove if this cell was refined
+            if cell_id in refined_parent_ids:
+                keys_to_delete.append(key)
+                continue
+            
+            # Remove if any successor was refined
+            if any(sid in refined_parent_ids for sid in successor_ids):
+                keys_to_delete.append(key)
+        
+        for key in keys_to_delete:
+            del self.successor_cache[key]
+        
+        print(f"    Removed {len(keys_to_delete)} stale cache entries")
+        
+        # Step 3: Compute successors for ALL affected cells
+        # This includes: new cells + cells that previously reached refined parents
+        affected_cells = set(new_cells)
+        
+        # Find all current leaf cells that might reach the refined region
+        all_leaves = self.cell_tree.get_leaves()
+        for cell in all_leaves:
+            # Check if this cell's successors might intersect with new cells' regions
+            # For simplicity, recompute if ANY successor was in a refined parent
+            for action in actions:
+                key = (cell.cell_id, action)
+                if key not in self.successor_cache:
+                    affected_cells.add(cell)
+                    break
+        
+        print(f"    Recomputing successors for {len(affected_cells)} affected cells")
+        
+        # Step 4: Recompute successors for all affected cells
+        for cell in affected_cells:
             for action in actions:
                 successors = self.reachability.compute_successor_cells(
                     cell, action, self.cell_tree
                 )
                 key = (cell.cell_id, action)
-                new_entries[key] = [s.cell_id for s in successors]
-        
-        # Update cache
-        self.successor_cache.update(new_entries)
+                self.successor_cache[key] = [s.cell_id for s in successors]
         
         elapsed = time.time() - start_time
-        print(f"  ✓ Updated cache in {elapsed:.2f}s (total cached: {len(self.successor_cache)})")
-        print(f"    Average: {len(new_entries)/elapsed:.1f} queries/second")
-        
+        print(f"  ✓ Cache updated in {elapsed:.2f}s (total cached: {len(self.successor_cache)})")
+            
     def _identify_boundary_cells(self) -> List[Cell]:
         """Identify boundary cells where V̄_γ(s) > 0 and V_γ(s) < 0."""
         boundary = []
@@ -1308,8 +1507,8 @@ def _plot_slice(
             b_x - a_x,
             b_y - a_y,
             facecolor=color,
-    edgecolor='none',  # No edge
-    linewidth=0,       # No width
+    edgecolor='black',  # No edge
+    linewidth=1,       # No width
     alpha=1.0
         )
         ax.add_patch(rect)
