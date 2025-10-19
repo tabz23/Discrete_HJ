@@ -86,7 +86,7 @@ class DubinsCarEnvironment(Environment):
         
         # Lipschitz constants
         self.L_f = v_const
-        self.L_l = 1#np.sqrt(2)
+        self.L_l = np.sqrt(2)
         self.actions = [-1.0, 0.0, 1.0]
     
     def get_state_bounds(self) -> np.ndarray:
@@ -153,7 +153,7 @@ class EvasionEnvironment(Environment):
 
         # Lipschitz constants
         self.L_f = 1 + self.v_const
-        self.L_l = 1 #np.sqrt(2)
+        self.L_l = np.sqrt(2)
 
     def get_state_bounds(self) -> np.ndarray:
         return self.state_bounds
@@ -1779,3 +1779,119 @@ if __name__ == "__main__":
 #   --epsilon 0.04 \
 #   --vi-iterations 1000 \
 #  --initial-resolution 1
+
+
+
+
+
+
+    
+    '''
+    
+    def test_lipschitz_constants(env, n_samples=10000):
+        """Empirically verify Lipschitz constants"""
+        
+        max_L_f_observed = 0
+        max_L_l_observed = 0
+        
+        for _ in range(n_samples):
+            # Random states
+            x = np.random.uniform(env.state_bounds[:, 0], env.state_bounds[:, 1])
+            x_prime = np.random.uniform(env.state_bounds[:, 0], env.state_bounds[:, 1])
+            
+            # Random action
+            u = np.random.choice(env.actions)
+            
+            # Test L_f
+            f_x = env._evasion_ode(x, 0, u)
+            f_x_prime = env._evasion_ode(x_prime, 0, u)
+            
+            state_diff_inf = np.max(np.abs(x - x_prime))
+            dynamics_diff_inf = np.max(np.abs(np.array(f_x) - np.array(f_x_prime)))
+            
+            if state_diff_inf > 1e-6:  # Avoid division by near-zero
+                L_f_sample = dynamics_diff_inf / state_diff_inf
+                max_L_f_observed = max(max_L_f_observed, L_f_sample)
+            
+            # Test L_l
+            l_x = env.failure_function(x)
+            l_x_prime = env.failure_function(x_prime)
+            
+            failure_diff = abs(l_x - l_x_prime)
+            
+            if state_diff_inf > 1e-6:
+                L_l_sample = failure_diff / state_diff_inf
+                max_L_l_observed = max(max_L_l_observed, L_l_sample)
+        
+        print(f"Observed max L_f: {max_L_f_observed:.6f} (claimed: {env.L_f})")
+        print(f"Observed max L_l: {max_L_l_observed:.6f} (claimed: {env.L_l})")
+        
+        return max_L_f_observed, max_L_l_observed
+
+    # Test it
+    env = EvasionEnvironment(v_const=1.0)
+    test_lipschitz_constants(env)
+    #Observed max L_f: 1.903273 (claimed: 2.0)
+    #Observed max L_l: 1.397104 (claimed: 1.4142135623730951)
+    
+
+    def test_lipschitz_constants(env, n_samples=10000):
+        """Empirically verify Lipschitz constants"""
+        
+        max_L_f_observed = 0
+        max_L_l_observed = 0
+        
+        for _ in range(n_samples):
+            # Random states
+            x = np.random.uniform(env.state_bounds[:, 0], env.state_bounds[:, 1])
+            x_prime = np.random.uniform(env.state_bounds[:, 0], env.state_bounds[:, 1])
+            
+            # Random action
+            u = np.random.choice(env.actions)
+            
+            # Test L_f
+            f_x = env._dubins_ode(x, 0, u)
+            f_x_prime = env._dubins_ode(x_prime, 0, u)
+            
+            state_diff_inf = np.max(np.abs(x - x_prime))
+            dynamics_diff_inf = np.max(np.abs(np.array(f_x) - np.array(f_x_prime)))
+            
+            if state_diff_inf > 1e-6:  # Avoid division by near-zero
+                L_f_sample = dynamics_diff_inf / state_diff_inf
+                max_L_f_observed = max(max_L_f_observed, L_f_sample)
+            
+            # Test L_l
+            l_x = env.failure_function(x)
+            l_x_prime = env.failure_function(x_prime)
+            
+            failure_diff = abs(l_x - l_x_prime)
+            
+            if state_diff_inf > 1e-6:
+                L_l_sample = failure_diff / state_diff_inf
+                max_L_l_observed = max(max_L_l_observed, L_l_sample)
+        
+        print(f"Observed max L_f: {max_L_f_observed:.6f} (claimed: {env.L_f})")
+        print(f"Observed max L_l: {max_L_l_observed:.6f} (claimed: {env.L_l})")
+        
+        return max_L_f_observed, max_L_l_observed
+
+
+    # Test it
+    env = DubinsCarEnvironment(v_const=1.0)
+    # Observed max L_f: 0.990269 (claimed: 1.0)
+    # Observed max L_l: 1.410656 (claimed: 1)
+    test_lipschitz_constants(env)
+    '''
+    
+    
+#     python safety_value_function_4_ris_all_leaves_optimized_new_newstopcondition_dubins_aircraft.py \
+#   --algorithm 2 \
+#   --dynamics evasion \
+#   --gamma 0.49 \
+#   --dt 0.05 \
+#   --velocity 1.0 \
+#   --epsilon 0.04 \
+#   --vi-iterations 1000 \
+#  --initial-resolution 1 \
+#   --conservative \
+#   --delta-max 1e-13
