@@ -86,7 +86,7 @@ class DubinsCarEnvironment(Environment):
         
         # Lipschitz constants
         self.L_f = v_const
-        self.L_l = np.sqrt(2)
+        self.L_l = 1#np.sqrt(2)
         self.actions = [-1.0, 0.0, 1.0]
     
     def get_state_bounds(self) -> np.ndarray:
@@ -153,7 +153,7 @@ class EvasionEnvironment(Environment):
 
         # Lipschitz constants
         self.L_f = 1 + self.v_const
-        self.L_l = np.sqrt(2)
+        self.L_l = 1 #np.sqrt(2)
 
     def get_state_bounds(self) -> np.ndarray:
         return self.state_bounds
