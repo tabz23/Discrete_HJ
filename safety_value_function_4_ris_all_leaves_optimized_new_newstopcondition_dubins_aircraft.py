@@ -446,10 +446,9 @@ class CellTree:
 # ============================================================================
 # PART 3: REACHABILITY ANALYZER
 # ============================================================================
-
 class GronwallReachabilityAnalyzer:
     """
-    Reachability using Grönwall's inequality with multi-step checkpoints
+    Reachability using Grönwall's inequality with multiple checkpoints.
     """
     
     def __init__(self, env, use_infinity_norm: bool = True, debug_verify: bool = False):
@@ -459,20 +458,28 @@ class GronwallReachabilityAnalyzer:
         
         L_f, _ = env.get_lipschitz_constants()
         self.L = L_f
-        self.dt = env.dt  # Checkpoint interval
-        self.tau = env.tau  # Control duration
+        self.dt = env.dt      # Checkpoint interval
+        self.tau = env.tau    # Control horizon
         
         # Number of checkpoints
-        self.n_checkpoints = int(np.ceil(self.tau / self.dt))
+        self.n_checkpoints = int(np.round(self.tau / self.dt))
+        
+        # Compute checkpoint times
+        self.checkpoint_times = np.linspace(self.dt, self.tau, self.n_checkpoints)
         
         # Growth factors for each checkpoint
-        self.growth_factors = [np.exp(self.L * (i * self.dt)) for i in range(1, self.n_checkpoints + 1)]
+        self.growth_factors = [np.exp(self.L * t) for t in self.checkpoint_times]
+        
+        # Debug statistics
+        self.debug_query_count = 0
+        self.debug_mismatch_count = 0
         
         print(f"\nGrönwall Reachability Initialized:")
         print(f"  Lipschitz constant L = {self.L}")
         print(f"  Checkpoint interval dt = {self.dt}")
-        print(f"  Control duration τ = {self.tau}")
+        print(f"  Control horizon τ = {self.tau}")
         print(f"  Number of checkpoints = {self.n_checkpoints}")
+        print(f"  Checkpoint times: {[f'{t:.3f}' for t in self.checkpoint_times]}")
         print(f"  Growth factors: {[f'{gf:.6f}' for gf in self.growth_factors]}")
     
     @staticmethod
@@ -507,80 +514,6 @@ class GronwallReachabilityAnalyzer:
         """Check if two angle intervals intersect."""
         return not (a_right < b_left or b_right < a_left)
     
-    def compute_reachable_set(self, cell, action) -> np.ndarray:
-        """
-        Compute UNION of reachable sets at all checkpoints.
-        Returns the bounding box of all checkpoint reachable sets.
-        """
-        center = cell.center
-        
-        if self.use_infinity_norm:
-            r = 0.5 * cell.get_max_range()
-        else:
-            ranges = np.array([cell.get_range(j) for j in range(len(cell.bounds))])
-            r = 0.5 * np.linalg.norm(ranges)
-        
-        # Get trajectory checkpoints
-        checkpoint_states = self.env.dynamics_multi_step(center, action, self.tau, self.dt)
-        
-        # Initialize union bounds
-        union_bounds = np.zeros((self.env.get_state_dim(), 2))
-        union_bounds[:, 0] = np.inf
-        union_bounds[:, 1] = -np.inf
-        
-        # Compute reachable set at each checkpoint and take union
-        for i, state_at_checkpoint in enumerate(checkpoint_states):
-            expansion = r * self.growth_factors[i]
-            
-            # Reachable set at this checkpoint
-            checkpoint_bounds = np.zeros((self.env.get_state_dim(), 2))
-            checkpoint_bounds[0, :] = [state_at_checkpoint[0] - expansion, state_at_checkpoint[0] + expansion]
-            checkpoint_bounds[1, :] = [state_at_checkpoint[1] - expansion, state_at_checkpoint[1] + expansion]
-            
-            # Theta bounds
-            theta_lower = state_at_checkpoint[2] - expansion
-            theta_upper = state_at_checkpoint[2] + expansion
-            theta_lower, theta_upper = self.fix_angle_interval(theta_lower, theta_upper)
-            checkpoint_bounds[2, :] = [theta_lower, theta_upper]
-            
-            # Union with accumulated bounds (for x, y)
-            union_bounds[0, 0] = min(union_bounds[0, 0], checkpoint_bounds[0, 0])
-            union_bounds[0, 1] = max(union_bounds[0, 1], checkpoint_bounds[0, 1])
-            union_bounds[1, 0] = min(union_bounds[1, 0], checkpoint_bounds[1, 0])
-            union_bounds[1, 1] = max(union_bounds[1, 1], checkpoint_bounds[1, 1])
-            
-            # Union for theta (more complex due to wrapping)
-            if i == 0:
-                union_bounds[2, :] = checkpoint_bounds[2, :]
-            else:
-                union_bounds[2, :] = self._union_angle_intervals(
-                    union_bounds[2, 0], union_bounds[2, 1],
-                    checkpoint_bounds[2, 0], checkpoint_bounds[2, 1]
-                )
-        
-        return union_bounds
-    
-    def _union_angle_intervals(self, a_left: float, a_right: float,
-                               b_left: float, b_right: float) -> Tuple[float, float]:
-        """Compute union of two angle intervals."""
-        # Normalize both intervals
-        a_left, a_right = self.fix_angle_interval(a_left, a_right)
-        b_left, b_right = self.fix_angle_interval(b_left, b_right)
-        
-        # If either interval covers full circle, return full circle
-        if (a_right - a_left >= 2*np.pi - 0.01) or (b_right - b_left >= 2*np.pi - 0.01):
-            return -np.pi, np.pi
-        
-        # Take min/max (this is conservative but correct)
-        union_left = min(a_left, b_left)
-        union_right = max(a_right, b_right)
-        
-        # Check if union wraps around
-        if union_right - union_left >= 2*np.pi - 0.01:
-            return -np.pi, np.pi
-        
-        return self.fix_angle_interval(union_left, union_right)
-    
     def _check_theta_intersection(self, candidate: Cell, reach_bounds: np.ndarray) -> bool:
         """Helper: Check if theta dimension intersects."""
         cand_theta_left, cand_theta_right = self.fix_angle_interval(
@@ -597,20 +530,67 @@ class GronwallReachabilityAnalyzer:
     
     def compute_successor_cells(self, cell, action, cell_tree) -> List[Cell]:
         """
-        Find all cells that intersect the reachable set (union over checkpoints).
+        Find all cells that intersect the reachable set at ANY checkpoint.
+        
+        Process:
+        1. Roll out dynamics from cell center for tau duration with dt intervals
+        2. At each checkpoint, compute Grönwall circle/bounds
+        3. Query cells intersecting those bounds
+        4. Union all successor sets (avoiding duplicates)
         """
-        reach_bounds = self.compute_reachable_set(cell, action)
+        center = cell.center
         
-        # Use spatial index for fast x,y intersection query
-        candidates = cell_tree.get_intersecting_cells(reach_bounds)
+        # Compute cell radius
+        if self.use_infinity_norm:
+            r = 0.5 * cell.get_max_range()
+        else:
+            ranges = np.array([cell.get_range(j) for j in range(len(cell.bounds))])
+            r = 0.5 * np.linalg.norm(ranges)
         
-        # Still need to manually check theta intersection
-        successors_new = []
-        for candidate in candidates:
-            if self._check_theta_intersection(candidate, reach_bounds):
-                successors_new.append(candidate)
+        # Roll out dynamics to get states at each checkpoint
+        checkpoint_states = self.env.dynamics_multi_step(center, action, self.tau, self.dt)
         
-        return successors_new
+        # Use set to track unique successor cell IDs (automatic deduplication)
+        successor_cell_ids = set()
+        
+        # For each checkpoint: compute reachable bounds and query successors
+        for i, state_at_checkpoint in enumerate(checkpoint_states):
+            # Grönwall expansion at this checkpoint time
+            growth_factor_i = self.growth_factors[i]
+            expansion_i = r * growth_factor_i
+            
+            # Compute reachable bounds (Grönwall circle) at this checkpoint
+            reach_bounds = np.zeros((self.env.get_state_dim(), 2))
+            
+            # x bounds
+            reach_bounds[0, 0] = state_at_checkpoint[0] - expansion_i
+            reach_bounds[0, 1] = state_at_checkpoint[0] + expansion_i
+            
+            # y bounds
+            reach_bounds[1, 0] = state_at_checkpoint[1] - expansion_i
+            reach_bounds[1, 1] = state_at_checkpoint[1] + expansion_i
+            
+            # θ bounds (with normalization)
+            theta_lower = state_at_checkpoint[2] - expansion_i
+            theta_upper = state_at_checkpoint[2] + expansion_i
+            theta_lower, theta_upper = self.fix_angle_interval(theta_lower, theta_upper)
+            reach_bounds[2, 0] = theta_lower
+            reach_bounds[2, 1] = theta_upper
+            
+            # Query spatial index for cells intersecting this checkpoint's bounds
+            candidates = cell_tree.get_intersecting_cells(reach_bounds)
+            
+            # Filter by theta intersection and add to successor set
+            for candidate in candidates:
+                if self._check_theta_intersection(candidate, reach_bounds):
+                    successor_cell_ids.add(candidate.cell_id)
+        
+        # Convert cell IDs back to Cell objects
+        cell_id_to_cell = {c.cell_id: c for c in cell_tree.get_leaves()}
+        successors = [cell_id_to_cell[cid] for cid in successor_cell_ids 
+                     if cid in cell_id_to_cell]
+        
+        return successors
     
     def print_debug_summary(self):
         """Print debug verification summary."""
@@ -1216,7 +1196,7 @@ class AdaptiveRefinement:
                 f"delta-max_{args.delta_max}"
             )
             output_dir = os.path.join(
-                "./results_adaptive_optimized_new_odeint_car_plane_new_fixedhorizon",
+                "./results_adaptive_optimized_new_odeint_car_plane_new_fixedhorizon_(dt_thenaddsucc)_new",
                 f"{rname}_{param_suffix}"
             )
         self.output_dir = output_dir
