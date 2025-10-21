@@ -31,10 +31,26 @@ from scipy.integrate import odeint
 # ============================================================================
 # PART 1: ENVIRONMENT DEFINITIONS
 # ============================================================================
-
 class Environment(ABC):
     """Abstract base class for dynamics environments."""
     
+    def __init__(self, dt: float, tau: float, **kwargs):
+        self.dt = dt
+        self.tau = tau
+        
+        ratio = tau / dt
+        n_steps = int(np.round(ratio))
+        
+        # Check if ratio is close to an integer (not using modulo!)
+        if not np.isclose(ratio, n_steps, rtol=1e-9, atol=1e-9):
+            raise ValueError(
+                f"tau ({tau}) must be evenly divisible by dt ({dt}). "
+                f"Current tau/dt = {ratio:.10f} (should be ~{n_steps}). "
+                f"Try tau={dt * n_steps} or dt={tau / n_steps}"
+            )
+        
+        self.n_steps = int(np.round(tau / dt))
+        print(f"  Time discretization: {self.n_steps} steps of dt={dt}s over tau={tau}s")
     @abstractmethod
     def get_state_bounds(self) -> np.ndarray:
         pass
@@ -45,6 +61,15 @@ class Environment(ABC):
     
     @abstractmethod
     def dynamics(self, state: np.ndarray, action) -> np.ndarray:
+        pass
+    
+    # NEW: Multi-step dynamics for computing trajectory
+    @abstractmethod
+    def dynamics_multi_step(self, state: np.ndarray, action, duration: float, dt: float) -> List[np.ndarray]:
+        """
+        Integrate dynamics from state with constant action for 'duration' seconds,
+        returning states at intervals of 'dt'.
+        """
         pass
     
     @abstractmethod
@@ -59,18 +84,35 @@ class Environment(ABC):
     def get_state_dim(self) -> int:
         pass
 
-
 # ----------------------------------------------------------------------------
 # Dubins Car Environment (Unchanged)
 # ----------------------------------------------------------------------------
 class DubinsCarEnvironment(Environment):
     """Dubins car with constant velocity navigating around a circular obstacle."""
     
-    def __init__(self, v_const: float = 1.0, dt: float = 0.1,
+class DubinsCarEnvironment(Environment):
+    def __init__(self, v_const: float = 1.0, dt: float = 0.1, tau: float = 1.0,
                  state_bounds: np.ndarray = None, obstacle_position: np.ndarray = None,
                  obstacle_radius: float = 0.5):
+        
+        # Validate before anything else
+        ratio = tau / dt
+        n_steps = int(np.round(ratio))
+        
+        # Check if ratio is close to an integer (not using modulo!)
+        if not np.isclose(ratio, n_steps, rtol=1e-9, atol=1e-9):
+            raise ValueError(
+                f"tau ({tau}) must be evenly divisible by dt ({dt}). "
+                f"Current tau/dt = {ratio:.10f} (should be ~{n_steps}). "
+                f"Try tau={dt * n_steps} or dt={tau / n_steps}"
+            )
+        
         self.v_const = v_const
         self.dt = dt
+        self.tau = tau
+        self.n_steps = int(np.round(tau / dt))
+        
+
         
         if state_bounds is None:
             self.state_bounds = np.array([[-3.0, 3.0], [-3.0, 3.0], [-np.pi, np.pi]])
@@ -103,13 +145,33 @@ class DubinsCarEnvironment(Environment):
         return np.array([dx_dt, dy_dt, dtheta_dt])
     
     def dynamics(self, state: np.ndarray, action: float) -> np.ndarray:
-        t_span = [0, self.dt]
+        """Single step dynamics for duration tau"""
+        t_span = [0, self.tau]
         solution = odeint(self._dubins_ode, state, t_span, args=(action,), atol=1e-12, rtol=1e-12)
         state_next = solution[-1]
         # Normalize theta to [-π, π]
         theta_next = np.arctan2(np.sin(state_next[2]), np.cos(state_next[2]))
         state_next[2] = theta_next
         return state_next
+    
+    def dynamics_multi_step(self, state: np.ndarray, action: float, duration: float, dt: float) -> List[np.ndarray]:
+        """
+        Integrate dynamics and return states at checkpoints.
+        Returns states at times [dt, 2*dt, 3*dt, ..., duration]
+        """
+        n_steps = int(np.ceil(duration / dt))
+        t_eval = np.linspace(0, duration, n_steps + 1)  # Include t=0
+        
+        solution = odeint(self._dubins_ode, state, t_eval, args=(action,), atol=1e-12, rtol=1e-12)
+        
+        # Normalize theta for all states
+        states = []
+        for s in solution[1:]:  # Skip initial state
+            theta_normalized = np.arctan2(np.sin(s[2]), np.cos(s[2]))
+            s[2] = theta_normalized
+            states.append(s.copy())
+        
+        return states
 
     def failure_function(self, state: np.ndarray) -> float:
         pos = state[:2]
@@ -126,20 +188,27 @@ class DubinsCarEnvironment(Environment):
 # ✈️ 3D Aircraft Evasion Environment (ODEINT-integrated)
 # ----------------------------------------------------------------------------
 class EvasionEnvironment(Environment):
-    """
-    3D evasion problem:
-        ẋ₁ = -v + v*cos(x₃) + u*x₂
-        ẋ₂ = v*sin(x₃) - u*x₁
-        ẋ₃ = -u
-    Collision if x₁² + x₂² ≤ 1.
-    """
-    def __init__(self, v_const=1.0, dt=0.05,
+    """3D evasion problem"""
+    
+    def __init__(self, v_const=1.0, dt=0.05, tau=1.0,
                  obstacle_position=(0.0, 0.0),
                  obstacle_radius=1.0, state_bounds=None):
         self.obstacle_position = np.array(obstacle_position)
         self.obstacle_radius = obstacle_radius
         self.v_const = v_const
-        self.dt = dt
+        self.dt = dt  # Checkpoint interval
+        self.tau = tau  # Control duration
+        # Validate before anything else
+        ratio = tau / dt
+        n_steps = int(np.round(ratio))
+        
+        # Check if ratio is close to an integer (not using modulo!)
+        if not np.isclose(ratio, n_steps, rtol=1e-9, atol=1e-9):
+            raise ValueError(
+                f"tau ({tau}) must be evenly divisible by dt ({dt}). "
+                f"Current tau/dt = {ratio:.10f} (should be ~{n_steps}). "
+                f"Try tau={dt * n_steps} or dt={tau / n_steps}"
+            )
 
         if state_bounds is None:
             self.state_bounds = np.array([[-5.0, 5.0],
@@ -148,10 +217,7 @@ class EvasionEnvironment(Environment):
         else:
             self.state_bounds = state_bounds
 
-        # Control discretization
         self.actions = np.linspace(-1.0, 1.0, 5)
-
-        # Lipschitz constants
         self.L_f = 1 + self.v_const
         self.L_l = np.sqrt(2)
 
@@ -161,7 +227,6 @@ class EvasionEnvironment(Environment):
     def get_action_space(self) -> List:
         return self.actions.tolist()
 
-    # ODE for odeint
     def _evasion_ode(self, state: np.ndarray, t: float, u: float) -> np.ndarray:
         x1, x2, x3 = state
         v = self.v_const
@@ -171,12 +236,31 @@ class EvasionEnvironment(Environment):
         return [dx1, dx2, dx3]
 
     def dynamics(self, state: np.ndarray, action: float) -> np.ndarray:
-        t_span = [0, self.dt]
+        """Single step dynamics for duration tau"""
+        t_span = [0, self.tau]
         sol = odeint(self._evasion_ode, state, t_span, args=(action,), atol=1e-12, rtol=1e-12)
         next_state = sol[-1]
-        # Normalize θ to [-π, π] for consistency with Dubins
         next_state[2] = np.arctan2(np.sin(next_state[2]), np.cos(next_state[2]))
         return next_state
+    
+    def dynamics_multi_step(self, state: np.ndarray, action: float, duration: float, dt: float) -> List[np.ndarray]:
+        """
+        Integrate dynamics and return states at checkpoints.
+        Returns states at times [dt, 2*dt, 3*dt, ..., duration]
+        """
+        n_steps = int(np.ceil(duration / dt))
+        t_eval = np.linspace(0, duration, n_steps + 1)  # Include t=0
+        
+        solution = odeint(self._evasion_ode, state, t_eval, args=(action,), atol=1e-12, rtol=1e-12)
+        
+        # Normalize theta for all states
+        states = []
+        for s in solution[1:]:  # Skip initial state
+            theta_normalized = np.arctan2(np.sin(s[2]), np.cos(s[2]))
+            s[2] = theta_normalized
+            states.append(s.copy())
+        
+        return states
 
     def failure_function(self, state: np.ndarray) -> float:
         x1, x2, _ = state
@@ -365,7 +449,7 @@ class CellTree:
 
 class GronwallReachabilityAnalyzer:
     """
-    Reachability using Grönwall's inequality: expansion = r * e^(Lt)
+    Reachability using Grönwall's inequality with multi-step checkpoints
     """
     
     def __init__(self, env, use_infinity_norm: bool = True, debug_verify: bool = False):
@@ -375,18 +459,21 @@ class GronwallReachabilityAnalyzer:
         
         L_f, _ = env.get_lipschitz_constants()
         self.L = L_f
-        self.dt = env.dt
+        self.dt = env.dt  # Checkpoint interval
+        self.tau = env.tau  # Control duration
         
-        self.growth_factor = np.exp(self.L * self.dt)
+        # Number of checkpoints
+        self.n_checkpoints = int(np.ceil(self.tau / self.dt))
         
-        # Debug statistics
-        self.debug_query_count = 0
-        self.debug_mismatch_count = 0
+        # Growth factors for each checkpoint
+        self.growth_factors = [np.exp(self.L * (i * self.dt)) for i in range(1, self.n_checkpoints + 1)]
         
         print(f"\nGrönwall Reachability Initialized:")
         print(f"  Lipschitz constant L = {self.L}")
-        print(f"  Time step dt = {self.dt}")
-        print(f"  Growth factor e^(Lt) = {self.growth_factor:.6f}")
+        print(f"  Checkpoint interval dt = {self.dt}")
+        print(f"  Control duration τ = {self.tau}")
+        print(f"  Number of checkpoints = {self.n_checkpoints}")
+        print(f"  Growth factors: {[f'{gf:.6f}' for gf in self.growth_factors]}")
     
     @staticmethod
     def fix_angle_interval(left_angle: float, right_angle: float) -> Tuple[float, float]:
@@ -421,7 +508,10 @@ class GronwallReachabilityAnalyzer:
         return not (a_right < b_left or b_right < a_left)
     
     def compute_reachable_set(self, cell, action) -> np.ndarray:
-        """Compute reachable set bounds using r * e^(Lt)."""
+        """
+        Compute UNION of reachable sets at all checkpoints.
+        Returns the bounding box of all checkpoint reachable sets.
+        """
         center = cell.center
         
         if self.use_infinity_norm:
@@ -430,22 +520,66 @@ class GronwallReachabilityAnalyzer:
             ranges = np.array([cell.get_range(j) for j in range(len(cell.bounds))])
             r = 0.5 * np.linalg.norm(ranges)
         
-        center_next = self.env.dynamics(center, action)
+        # Get trajectory checkpoints
+        checkpoint_states = self.env.dynamics_multi_step(center, action, self.tau, self.dt)
         
-        expansion = r * self.growth_factor
+        # Initialize union bounds
+        union_bounds = np.zeros((self.env.get_state_dim(), 2))
+        union_bounds[:, 0] = np.inf
+        union_bounds[:, 1] = -np.inf
         
-        reach_bounds = np.zeros((self.env.get_state_dim(), 2))
+        # Compute reachable set at each checkpoint and take union
+        for i, state_at_checkpoint in enumerate(checkpoint_states):
+            expansion = r * self.growth_factors[i]
+            
+            # Reachable set at this checkpoint
+            checkpoint_bounds = np.zeros((self.env.get_state_dim(), 2))
+            checkpoint_bounds[0, :] = [state_at_checkpoint[0] - expansion, state_at_checkpoint[0] + expansion]
+            checkpoint_bounds[1, :] = [state_at_checkpoint[1] - expansion, state_at_checkpoint[1] + expansion]
+            
+            # Theta bounds
+            theta_lower = state_at_checkpoint[2] - expansion
+            theta_upper = state_at_checkpoint[2] + expansion
+            theta_lower, theta_upper = self.fix_angle_interval(theta_lower, theta_upper)
+            checkpoint_bounds[2, :] = [theta_lower, theta_upper]
+            
+            # Union with accumulated bounds (for x, y)
+            union_bounds[0, 0] = min(union_bounds[0, 0], checkpoint_bounds[0, 0])
+            union_bounds[0, 1] = max(union_bounds[0, 1], checkpoint_bounds[0, 1])
+            union_bounds[1, 0] = min(union_bounds[1, 0], checkpoint_bounds[1, 0])
+            union_bounds[1, 1] = max(union_bounds[1, 1], checkpoint_bounds[1, 1])
+            
+            # Union for theta (more complex due to wrapping)
+            if i == 0:
+                union_bounds[2, :] = checkpoint_bounds[2, :]
+            else:
+                union_bounds[2, :] = self._union_angle_intervals(
+                    union_bounds[2, 0], union_bounds[2, 1],
+                    checkpoint_bounds[2, 0], checkpoint_bounds[2, 1]
+                )
         
-        reach_bounds[0, :] = [center_next[0] - expansion, center_next[0] + expansion]
-        reach_bounds[1, :] = [center_next[1] - expansion, center_next[1] + expansion]
+        return union_bounds
+    
+    def _union_angle_intervals(self, a_left: float, a_right: float,
+                               b_left: float, b_right: float) -> Tuple[float, float]:
+        """Compute union of two angle intervals."""
+        # Normalize both intervals
+        a_left, a_right = self.fix_angle_interval(a_left, a_right)
+        b_left, b_right = self.fix_angle_interval(b_left, b_right)
         
-        theta_lower = center_next[2] - expansion
-        theta_upper = center_next[2] + expansion
+        # If either interval covers full circle, return full circle
+        if (a_right - a_left >= 2*np.pi - 0.01) or (b_right - b_left >= 2*np.pi - 0.01):
+            return -np.pi, np.pi
         
-        theta_lower, theta_upper = self.fix_angle_interval(theta_lower, theta_upper)
-        reach_bounds[2, :] = [theta_lower, theta_upper]
+        # Take min/max (this is conservative but correct)
+        union_left = min(a_left, b_left)
+        union_right = max(a_right, b_right)
         
-        return reach_bounds
+        # Check if union wraps around
+        if union_right - union_left >= 2*np.pi - 0.01:
+            return -np.pi, np.pi
+        
+        return self.fix_angle_interval(union_left, union_right)
     
     def _check_theta_intersection(self, candidate: Cell, reach_bounds: np.ndarray) -> bool:
         """Helper: Check if theta dimension intersects."""
@@ -463,7 +597,7 @@ class GronwallReachabilityAnalyzer:
     
     def compute_successor_cells(self, cell, action, cell_tree) -> List[Cell]:
         """
-        Find all cells that intersect the reachable set using spatial index.
+        Find all cells that intersect the reachable set (union over checkpoints).
         """
         reach_bounds = self.compute_reachable_set(cell, action)
         
@@ -1074,6 +1208,7 @@ class AdaptiveRefinement:
                 f"dynamics_{args.dynamics}_"
                 f"gamma_{args.gamma:.3f}_"
                 f"dt_{env.dt:.3f}_"
+                f"tau_{env.tau:.3f}_"
                 f"tol_{args.tolerance:.1e}_"
                 f"eps_{args.epsilon:.3f}"
                 f"vi-iterations_{args.vi_iterations}"
@@ -1081,7 +1216,7 @@ class AdaptiveRefinement:
                 f"delta-max_{args.delta_max}"
             )
             output_dir = os.path.join(
-                "./results_adaptive_optimized_new_odeint_car_plane_new",
+                "./results_adaptive_optimized_new_odeint_car_plane_new_fixedhorizon",
                 f"{rname}_{param_suffix}"
             )
         self.output_dir = output_dir
@@ -1571,7 +1706,7 @@ def run_algorithm_1(args, env):
     print(f"Initializing grid with resolution {args.resolution}^3...")
     cell_tree = CellTree(env.get_state_bounds(), initial_resolution=args.resolution)
     reachability = GronwallReachabilityAnalyzer(env)
-    value_iter = SafetyValueIterator(env=env, gamma=args.gamma, cell_tree=cell_tree, reachability=reachability,output_dir=f"./results/algorithm1_dynamics_{args.dynamics}_resol_{args.resolution},tol_{args.tolerance:.1e}")
+    value_iter = SafetyValueIterator(env=env, gamma=args.gamma, cell_tree=cell_tree, reachability=reachability,output_dir=f"./results/algorithm1_dynamics_{args.dynamics}_resol_{args.resolution},tol_{args.tolerance:.1e}_tau_{args.tau:.3f}_dt_{args.dt:.3f}_")
     start_time = time.time()
     conv_upper, conv_lower = value_iter.value_iteration(
         max_iterations=args.iterations,
@@ -1626,7 +1761,9 @@ def main():
     parser.add_argument('--velocity', type=float, default=1.0,
                        help="Constant velocity")
     parser.add_argument('--dt', type=float, default=0.1,
-                       help="Time step for dynamics integration")
+                       help="Checkpoint interval for reachability computation")
+    parser.add_argument('--tau', type=float, default=1.0,
+                       help="Control duration (action hold time)")
     # parser.add_argument('--obstacle-radius', type=float, default=1.3,
     #                    help="Radius of circular obstacle (Dubins only)")
     parser.add_argument('--gamma', type=float, default=0.1,
@@ -1670,11 +1807,13 @@ def main():
     # ✅ Environment selection
     if args.dynamics == 'dubins':
         env = DubinsCarEnvironment(
-            v_const=args.velocity, dt=args.dt, obstacle_radius=1.3
+            v_const=args.velocity, dt=args.dt, tau=args.tau, obstacle_radius=1.3
         )
     else:
-        env = EvasionEnvironment(v_const=args.velocity, dt=args.dt,obstacle_position=(0.0, 0.0),
-                obstacle_radius=1.0)
+        env = EvasionEnvironment(
+            v_const=args.velocity, dt=args.dt, tau=args.tau,
+            obstacle_position=(0.0, 0.0), obstacle_radius=1.0
+        )
 
     # Continue as before
     if args.algorithm == 1:
