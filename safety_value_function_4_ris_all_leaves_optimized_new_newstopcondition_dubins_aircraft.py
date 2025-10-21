@@ -1081,7 +1081,7 @@ class AdaptiveRefinement:
                 f"delta-max_{args.delta_max}"
             )
             output_dir = os.path.join(
-                "./results_adaptive_optimized_new_odeint_car_plane",
+                "./results_adaptive_optimized_new_odeint_car_plane_new",
                 f"{rname}_{param_suffix}"
             )
         self.output_dir = output_dir
@@ -1306,7 +1306,7 @@ def plot_value_function(
 ):
     """Plots 2D slices of the 3D value function for Dubins car."""
     if theta_slices is None:
-        theta_slices = [0, np.pi/4, np.pi/2]
+        theta_slices = [0, np.pi/4, np.pi/2, np.pi]
     
     n_slices = len(theta_slices)
     fig, axes = plt.subplots(3, n_slices, figsize=(5*n_slices, 14))
@@ -1359,7 +1359,7 @@ def _plot_slice(
             continue
         
         if upper and cell.V_upper is not None:
-            values.append(cell.V_upper)
+            values.append(cell. V_upper)
             relevant_cells.append((cell, cell.V_upper))
         elif not upper and cell.V_lower is not None:
             values.append(cell.V_lower)
@@ -1379,171 +1379,98 @@ def _plot_slice(
     #     print(f"    V_γ statistics (θ={theta:.2f}): min={min(values):.40f}, max={max(values):.40f}")
     
     # Determine color scale
-    vmin = min(values)
-    vmax = max(values)
-    
-    # Use a diverging colormap centered at 0 (safe/unsafe boundary)
+    # Determine color scale
+    # Determine color scale
     from matplotlib.colors import TwoSlopeNorm, Normalize
+    from matplotlib.ticker import ScalarFormatter, FormatStrFormatter
     cmap = plt.cm.RdYlGn
-    
-    # Handle edge cases for TwoSlopeNorm - FIXED: Better handling of negative ranges
-    epsilon = 1e-6
-    
-    if abs(vmax - vmin) < 1e-10:
-        if abs(vmin) < 1e-10:
-            norm = Normalize(vmin=-0.1, vmax=0.1)
-        else:
-            norm = Normalize(vmin=vmin-0.1*abs(vmin), vmax=vmax+0.1*abs(vmax))
-    elif vmin > 0:
-        # All values are positive
-        norm = TwoSlopeNorm(vmin=0, vcenter=max(0, vmin-epsilon), vmax=vmax)
-    elif vmax < 0:
-        # All values are negative - FIXED: Ensure proper ordering
-        # When vmax is negative, we need vmin < vcenter < vmax
-        # But vmax is already negative, so we need vcenter to be between vmin and vmax
-        vcenter = (vmin + vmax) / 2  # Center between the negative values
-        if vmin < vcenter < vmax:
-            norm = TwoSlopeNorm(vmin=vmin, vcenter=vcenter, vmax=vmax)
-        else:
-            # Fallback: use symmetric range around 0
-            abs_max = max(abs(vmin), abs(vmax))
-            norm = TwoSlopeNorm(vmin=-abs_max, vcenter=0, vmax=abs_max)
-    elif vmin == 0 and vmax > 0:
-        norm = TwoSlopeNorm(vmin=0, vcenter=epsilon, vmax=vmax)
-    elif vmin < 0 and vmax == 0:
-        # FIXED: Handle case where max is exactly 0 but min is negative
-        norm = TwoSlopeNorm(vmin=vmin, vcenter=vmin/2, vmax=0)
-    elif vmin == 0 and vmax == 0:
-        norm = Normalize(vmin=-0.1, vmax=0.1)
+
+    # --- FIXED COLOR NORMALIZATION ---
+    from matplotlib.colors import Normalize
+    from matplotlib.ticker import FuncFormatter
+    cmap = plt.cm.RdYlGn
+
+    vmin, vmax = np.min(values), np.max(values)
+
+    # If all values are the same, expand slightly
+    if np.isclose(vmin, vmax):
+        vmin, vmax = vmin - 1e-12, vmax + 1e-12
+
+    # If all values are negative, still use full colormap range (no white)
+    if vmax <= 0:
+        # shift range so that colormap still covers dark to bright
+        norm = Normalize(vmin=vmin, vmax=0)
+    elif vmin >= 0:
+        norm = Normalize(vmin=0, vmax=vmax)
     else:
-        # Mixed positive and negative values
-        norm = TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
-    
+        # mixed sign values
+        norm = Normalize(vmin=vmin, vmax=vmax)
+
     # Plot each cell as a colored rectangle
     for cell, value in relevant_cells:
         a_x, b_x = cell.bounds[0]
         a_y, b_y = cell.bounds[1]
-        
         color = cmap(norm(value))
-        
-        rect = Rectangle(
-            (a_x, a_y),
-            b_x - a_x,
-            b_y - a_y,
-            facecolor=color,
-            edgecolor='black',
-            linewidth=1,
-            alpha=1.0
-        )
+        rect = Rectangle((a_x, a_y), b_x - a_x, b_y - a_y,
+                         facecolor=color, edgecolor='black', linewidth=1, alpha=1.0)
         ax.add_patch(rect)
-    
-    # Add contour lines around regions where value > 0
-    # Create a grid for contour plotting
-    grid_resolution = 200
-    x_grid = np.linspace(x_min, x_max, grid_resolution)
-    y_grid = np.linspace(y_min, y_max, grid_resolution)
-    X, Y = np.meshgrid(x_grid, y_grid)
-    
-    # Create a value grid by finding the cell containing each grid point
-    Z = np.full(X.shape, np.nan)
-    
-    for i in range(grid_resolution):
-        for j in range(grid_resolution):
-            point = np.array([X[i, j], Y[i, j], theta])
-            # Find the cell containing this point
-            for cell, value in relevant_cells:
-                if cell.contains_point(point):
-                    Z[i, j] = value
-                    break
-    
-    # Only draw contours if we have valid data
-    if not np.all(np.isnan(Z)):
-        # Get the actual data range for meaningful contour levels
-        data_min = np.nanmin(Z)
-        data_max = np.nanmax(Z)
-        
-        # Draw contour line at V = 0 (safe/unsafe boundary) - THICK and VISIBLE
-        if data_min < 0 < data_max:  # Only draw if 0 is within data range
-            contour_zero = ax.contour(X, Y, Z, levels=[0], 
-                                    colors='black', linewidths=3, linestyles='-')
-            # Add label to the zero contour
-            ax.clabel(contour_zero, inline=True, fontsize=10, fmt='V=0')
-        
-        # Draw additional contours for positive values
-        if data_max > 0:
-            # Create meaningful positive contour levels
-            positive_range = np.linspace(0.1 * data_max, 0.9 * data_max, 2)
-            positive_levels = [level for level in positive_range if level > 0]
-            
-            if positive_levels:
-                contour_positive = ax.contour(X, Y, Z, levels=positive_levels, 
-                                            colors='white', linewidths=2, linestyles='-', alpha=0.8)
-                # Add labels to positive contours
-                ax.clabel(contour_positive, inline=True, fontsize=9, 
-                         fmt=lambda x: f'{x:.3f}')
-        
-        # Draw contours for negative values for completeness
-        if data_min < 0:
-            negative_range = np.linspace(0.9 * data_min, 0.1 * data_min, 2)
-            negative_levels = [level for level in negative_range if level < 0]
-            
-            if negative_levels:
-                contour_negative = ax.contour(X, Y, Z, levels=negative_levels, 
-                                            colors='darkred', linewidths=1, linestyles='--', alpha=0.7)
-                # Add labels to negative contours
-                ax.clabel(contour_negative, inline=True, fontsize=8, 
-                         fmt=lambda x: f'{x:.3f}')
-    
-    # Draw obstacle
-    
-    if isinstance(env, DubinsCarEnvironment):
-        obstacle = Circle(
-            env.obstacle_position,
-            env.obstacle_radius,
-            facecolor='none',
-            edgecolor='darkblue',
-            linewidth=2,
-            zorder=10
-        )
-        ax.add_patch(obstacle)
-    elif isinstance(env, EvasionEnvironment):
-        obstacle = Circle(
-            (0, 0),
-            env.obstacle_radius,
-            facecolor='none',
-            edgecolor='darkred',
-            linestyle='--',
-            linewidth=2,
-            zorder=10
-        )
 
-        ax.add_patch(obstacle)
-    
+    # Draw obstacle
+    if isinstance(env, DubinsCarEnvironment):
+        obstacle = Circle(env.obstacle_position, env.obstacle_radius,
+                          facecolor='none', edgecolor='darkblue', linewidth=2, zorder=10)
+    elif isinstance(env, EvasionEnvironment):
+        obstacle = Circle((0, 0), env.obstacle_radius,
+                          facecolor='none', edgecolor='darkred', linestyle='--', linewidth=2, zorder=10)
+    ax.add_patch(obstacle)
+
     ax.set_xlabel('x')
     ax.set_ylabel('y')
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
     ax.set_aspect('equal')
     ax.grid(False)
-    
-    # Add colorbar with explicit ticks
+
+    from matplotlib.ticker import FuncFormatter
+
     sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
     sm.set_array([])
-    
     cbar = plt.colorbar(sm, ax=ax, label=label)
-    
-    # Set explicit tick locations
-    if vmin < 0 and vmax > 0:
-        tick_vals = [vmin, vmin/2, 0, vmax/2, vmax]
-    elif vmin >= 0:
-        tick_vals = [0, vmax/3, 2*vmax/3, vmax]
-    elif vmax <= 0:
-        tick_vals = [vmin, 2*vmin/3, vmin/3, 0]
-    else:
-        tick_vals = [vmin, 0, vmax]
-    
+
+    # --- Use scientific notation ---
+    cbar.ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:.1e}'))
+    cbar.ax.yaxis.get_offset_text().set_visible(False)
+
+    # --- Set evenly spaced ticks, excluding the very top (vmax) ---
+    tick_vals = np.linspace(vmin, vmax, 5)
+    tick_vals = tick_vals[:-1]  # remove top tick to avoid overlap
+    # cbar.set_ticks(tick_vals)
+    # cbar.update_ticks()
+
+    # optional: pad labels slightly away from bar to avoid clipping
+    # cbar.ax.tick_params(pad=2)
+
+
+    # Explicit ticks (optional)
+    cbar.ax.yaxis.offsetText.set_visible(False)
+    def safe_ticks(vmin, vmax, zero_threshold=0.1):
+        """
+        Plot vmin, vmax, and optionally 0 if both are sufficiently far from 0.
+        """
+        ticks = [vmin, vmax]
+
+        # include 0 only if both sides are at least ±zero_threshold away from zero
+        if abs(vmin) >= zero_threshold and abs(vmax) >= zero_threshold:
+            ticks.insert(1, 0.0)
+
+        # Ensure unique and sorted ticks (helps with colorbar orientation)
+        ticks = sorted(set(ticks))
+        return ticks
+
+    tick_vals = safe_ticks(vmin, vmax)
     cbar.set_ticks(tick_vals)
-    cbar.set_ticklabels([f'{v:.3f}' for v in tick_vals])
+    cbar.ax.set_yticklabels([f'{v:.1e}' for v in tick_vals])
+
     
     
 def _plot_classification_slice(
@@ -1644,7 +1571,7 @@ def run_algorithm_1(args, env):
     print(f"Initializing grid with resolution {args.resolution}^3...")
     cell_tree = CellTree(env.get_state_bounds(), initial_resolution=args.resolution)
     reachability = GronwallReachabilityAnalyzer(env)
-    value_iter = SafetyValueIterator(env=env, gamma=args.gamma, cell_tree=cell_tree, reachability=reachability)
+    value_iter = SafetyValueIterator(env=env, gamma=args.gamma, cell_tree=cell_tree, reachability=reachability,output_dir=f"./results/algorithm1_dynamics_{args.dynamics}_resol_{args.resolution},tol_{args.tolerance:.1e}")
     start_time = time.time()
     conv_upper, conv_lower = value_iter.value_iteration(
         max_iterations=args.iterations,
@@ -1712,7 +1639,7 @@ def main():
                        help="Maximum value iterations (Algorithm 1)")
     parser.add_argument('--tolerance', type=float, default=1e-15,
                        help="Convergence tolerance")
-    parser.add_argument('--plot-freq', type=int, default=25,
+    parser.add_argument('--plot-freq', type=int, default=1000, #dont create intermediate plots
                        help="Plot frequency in iterations (Algorithm 1)")
     parser.add_argument('--epsilon', type=float, default=0.1,
                        help="Error tolerance for refinement (Algorithm 2)")
