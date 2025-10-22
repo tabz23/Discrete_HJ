@@ -799,7 +799,7 @@ class SafetyValueIterator:
         print(f"  ✓ Initialized in {elapsed:.2f}s ({len(new_cells)/elapsed:.1f} cells/s)")
         
     def value_iteration(self, max_iterations: int = 1000, convergence_tol: float = 1e-3,
-                    plot_freq: int = 10, conservative_mode: bool = False, delta_max: float = 1e-6) -> Tuple[np.ndarray, np.ndarray]:
+                plot_freq: int = 10, conservative_mode: bool = False, delta_max: float = 1e-6) -> Tuple[np.ndarray, np.ndarray]:
         """
         Run value iteration until convergence (Algorithm 1 or 3).
         """
@@ -819,7 +819,7 @@ class SafetyValueIterator:
         print(f"Conservative mode: {conservative_mode}")
         if conservative_mode:
             print(f"Conservative tolerance δ_max: {delta_max}")
-            print(f"Conservative margin will be: ε_cons = (γ * δ_max) / (1 - γ) = ({self.gamma} * {delta_max}) / {1 - self.gamma}")
+            print(f"Conservative margin will be: ε_cons = (γ * δ_actual) / (1 - γ)")
         else:
             print(f"Convergence tolerance: {convergence_tol}")
         print(f"Number of cells: {self.cell_tree.get_num_leaves()}")
@@ -884,24 +884,42 @@ class SafetyValueIterator:
                     f"||V_^k - V_^k-1||_∞ = {diff_lower:12.20f}, "
                     f"δ^k = {delta_k:12.20f}")
                 
-                # Conservative stopping: δ^k ≥ -δ_max
-                if delta_k >= -delta_max:
+                # MODIFIED: Conservative stopping with V_upper check
+                if delta_k >= -delta_max and diff_upper < convergence_tol:
                     print(f"\n" + "="*60)
                     print("✓ CONSERVATIVE STOPPING CONDITION MET (Algorithm 3)")
                     print("="*60)
                     print(f"  δ^k = {delta_k:.10e} ≥ -δ_max = -{delta_max:.10e}")
+                    print(f"  ||V̄^k - V̄^k-1||_∞ = {diff_upper:.10e} < {convergence_tol}")
                     
-                    # Apply conservative correction to V_lower (Algorithm 3, line 29)
-                    epsilon_cons = (self.gamma * delta_max) / (1 - self.gamma)
-                    print(f"  Applying conservative margin: ε_cons = (γ * δ_max) / (1 - γ)")
-                    print(f"  ε_cons = ({self.gamma} * {delta_max}) / {1 - self.gamma} = {epsilon_cons:.10e}")
+                    # MODIFIED: Apply conservative correction using min(|delta_k|, delta_max)
+                    # If delta_k is negative but small, use |delta_k| instead of delta_max for less conservative correction
+                    delta_to_use = min(abs(delta_k), delta_max) if delta_k < 0 else delta_max
+                    epsilon_cons = (self.gamma * delta_to_use) / (1 - self.gamma)
+                    
+                    print(f"  Using δ_actual = {delta_to_use:.10e} (min of |δ^k|={abs(delta_k):.10e}, δ_max={delta_max:.10e})")
+                    print(f"  Applying conservative margin: ε_cons = (γ * δ_actual) / (1 - γ)")
+                    print(f"  ε_cons = ({self.gamma} * {delta_to_use:.10e}) / {1 - self.gamma} = {epsilon_cons:.10e}")
                     print(f"  Correcting V_lower for {len(leaves)} cells: V_lower ← V_lower - ε_cons")
                     
                     for cell in leaves:
                         cell.V_lower = cell.V_lower - epsilon_cons
                     
                     print(f"  ✓ Conservative correction applied successfully")
-                    self._save_plot(iteration + 1, final=True)
+                    
+                    # Save final plot
+                    suffix = "_final"
+                    if self.refinement_phase > 0:
+                        filename = os.path.join(
+                            self.output_dir, 
+                            f"iteration_{iteration + 1:04d}_refinement_{self.refinement_phase:02d}{suffix}.png"
+                        )
+                    else:
+                        filename = os.path.join(
+                            self.output_dir, 
+                            f"iteration_{iteration + 1:04d}{suffix}.png"
+                        )
+                    plot_value_function(self.env, self.cell_tree, filename, iteration + 1)
                     break
             else:
                 # ALGORITHM 1: Standard convergence
@@ -916,12 +934,36 @@ class SafetyValueIterator:
                     print(f"  ||V̄^k - V̄^k-1||_∞ = {diff_upper:.20e} < tolerance = {convergence_tol}")
                     print(f"  ||V_^k - V_^k-1||_∞ = {diff_lower:.20e} < tolerance = {convergence_tol}")
                     print(f"  Converged in {iteration + 1} iterations")
-                    self._save_plot(iteration + 1, final=True)
+                    
+                    # Save final plot
+                    suffix = "_final"
+                    if self.refinement_phase > 0:
+                        filename = os.path.join(
+                            self.output_dir, 
+                            f"iteration_{iteration + 1:04d}_refinement_{self.refinement_phase:02d}{suffix}.png"
+                        )
+                    else:
+                        filename = os.path.join(
+                            self.output_dir, 
+                            f"iteration_{iteration + 1:04d}{suffix}.png"
+                        )
+                    plot_value_function(self.env, self.cell_tree, filename, iteration + 1)
                     break
             
             # Periodic plotting
             if plot_freq > 0 and (iteration + 1) % plot_freq == 0:
-                self._save_plot(iteration + 1)
+                suffix = ""
+                if self.refinement_phase > 0:
+                    filename = os.path.join(
+                        self.output_dir, 
+                        f"iteration_{iteration + 1:04d}_refinement_{self.refinement_phase:02d}{suffix}.png"
+                    )
+                else:
+                    filename = os.path.join(
+                        self.output_dir, 
+                        f"iteration_{iteration + 1:04d}{suffix}.png"
+                    )
+                plot_value_function(self.env, self.cell_tree, filename, iteration + 1)
                 print(f"  [Plot saved at iteration {iteration + 1}]")
                 
         # Final iteration summary if max iterations reached
@@ -937,7 +979,11 @@ class SafetyValueIterator:
             
             # Apply conservative correction even if max iterations reached
             if conservative_mode:
-                epsilon_cons = (self.gamma * delta_max) / (1 - self.gamma)
+                # MODIFIED: Use min(|delta_k|, delta_max) when max iterations reached
+                delta_to_use = min(abs(delta_k), delta_max) if delta_k < 0 else delta_max
+                epsilon_cons = (self.gamma * delta_to_use) / (1 - self.gamma)
+                
+                print(f"  Using δ_actual = {delta_to_use:.10e} for correction")
                 print(f"  Applying conservative margin: ε_cons = {epsilon_cons:.10e}")
                 for cell in leaves:
                     cell.V_lower = cell.V_lower - epsilon_cons
@@ -946,8 +992,8 @@ class SafetyValueIterator:
         print(f"\nValue iteration completed in {iteration + 1} iterations")
         return np.array(conv_history_upper), np.array(conv_history_lower)
     def local_value_iteration(self, updated_cells: Set[Cell], max_iterations: int = 100,
-                        convergence_tol: float = 1e-3, conservative_mode: bool = False, 
-                        delta_max: float = 1e-6) -> Tuple[np.ndarray, np.ndarray]:
+                    convergence_tol: float = 1e-3, conservative_mode: bool = False, 
+                    delta_max: float = 1e-6) -> Tuple[np.ndarray, np.ndarray]:
         """
         LOCAL value iteration: update ALL leaves after refinement.
         """
@@ -1033,14 +1079,20 @@ class SafetyValueIterator:
                     f"||V_^k - V_^k-1||_∞ = {diff_lower:10.20f}, "
                     f"δ^k = {delta_k:12.20f}")
                 
-                if delta_k >= -delta_max:
+                # MODIFIED: Check both V_upper convergence AND conservative condition for V_lower
+                if delta_k >= -delta_max and diff_upper < convergence_tol:
                     print(f"    " + "="*40)
                     print(f"    ✓ CONSERVATIVE STOPPING (Local VI)")
                     print(f"    " + "="*40)
                     print(f"      δ^k = {delta_k:.20e} ≥ -δ_max = -{delta_max:.20e}")
+                    print(f"      ||V̄^k - V̄^k-1||_∞ = {diff_upper:.20e} < {convergence_tol}")
                     
-                    # Apply conservative correction
-                    epsilon_cons = (self.gamma * delta_max) / (1 - self.gamma)
+                    # MODIFIED: Use min(|delta_k|, delta_max) for less conservative correction
+                    # If delta_k is negative but small, use |delta_k| instead of delta_max
+                    delta_to_use = min(abs(delta_k), delta_max) if delta_k < 0 else delta_max
+                    epsilon_cons = (self.gamma * delta_to_use) / (1 - self.gamma)
+                    
+                    print(f"      Using δ_actual = {delta_to_use:.20e} (min of |δ^k|={abs(delta_k):.20e}, δ_max={delta_max:.20e})")
                     print(f"      Applying conservative margin: ε_cons = {epsilon_cons:.20e}")
                     print(f"      Correcting V_lower for {len(leaves)} cells")
                     
@@ -1076,7 +1128,11 @@ class SafetyValueIterator:
             
             # Apply conservative correction even if max iterations reached
             if conservative_mode:
-                epsilon_cons = (self.gamma * delta_max) / (1 - self.gamma)
+                # MODIFIED: Use min(|delta_k|, delta_max) when max iterations reached too
+                delta_to_use = min(abs(delta_k), delta_max) if delta_k < 0 else delta_max
+                epsilon_cons = (self.gamma * delta_to_use) / (1 - self.gamma)
+                
+                print(f"      Using δ_actual = {delta_to_use:.10e} for correction")
                 print(f"      Applying conservative margin: ε_cons = {epsilon_cons:.10e}")
                 for cell in leaves:
                     cell.V_lower = cell.V_lower - epsilon_cons
@@ -1754,7 +1810,7 @@ def main():
                        help="Grid resolution per dimension (Algorithm 1)")
     parser.add_argument('--iterations', type=int, default=200,
                        help="Maximum value iterations (Algorithm 1)")
-    parser.add_argument('--tolerance', type=float, default=1e-15,
+    parser.add_argument('--tolerance', type=float, default=1e-13,
                        help="Convergence tolerance")
     parser.add_argument('--plot-freq', type=int, default=1000, #dont create intermediate plots
                        help="Plot frequency in iterations (Algorithm 1)")

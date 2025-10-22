@@ -1204,7 +1204,7 @@ class AdaptiveRefinement:
                 f"vi-iterations_{args.vi_iterations}"
             )
             output_dir = os.path.join(
-                "./results_adaptive_optimized_new",
+                "./results_adaptive_optimized_new_odeint",
                 f"{rname}_{param_suffix}"
             )
         self.output_dir = output_dir
@@ -1856,7 +1856,7 @@ def run_algorithm_2(args):
         f"vi-iterations_{args.vi_iterations}"
     )
     output_dir = os.path.join(
-        "./results_adaptive_optimized_new",
+        "./results_adaptive_optimized_new_odeint",
         f"{rname}_{param_suffix}"
     )
     
