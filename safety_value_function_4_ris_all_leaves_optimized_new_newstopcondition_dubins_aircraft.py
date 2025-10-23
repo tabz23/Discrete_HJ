@@ -894,7 +894,7 @@ class SafetyValueIterator:
                     
                     # MODIFIED: Apply conservative correction using min(|delta_k|, delta_max)
                     # If delta_k is negative but small, use |delta_k| instead of delta_max for less conservative correction
-                    delta_to_use = min(abs(delta_k), delta_max) if delta_k < 0 else delta_max
+                    delta_to_use = min(abs(delta_k), delta_max)# if delta_k < 0 else delta_max
                     epsilon_cons = (self.gamma * delta_to_use) / (1 - self.gamma)
                     
                     print(f"  Using δ_actual = {delta_to_use:.10e} (min of |δ^k|={abs(delta_k):.10e}, δ_max={delta_max:.10e})")
@@ -980,7 +980,7 @@ class SafetyValueIterator:
             # Apply conservative correction even if max iterations reached
             if conservative_mode:
                 # MODIFIED: Use min(|delta_k|, delta_max) when max iterations reached
-                delta_to_use = min(abs(delta_k), delta_max) if delta_k < 0 else delta_max
+                delta_to_use = min(abs(delta_k), delta_max) #if delta_k < 0 else delta_max
                 epsilon_cons = (self.gamma * delta_to_use) / (1 - self.gamma)
                 
                 print(f"  Using δ_actual = {delta_to_use:.10e} for correction")
@@ -1089,7 +1089,7 @@ class SafetyValueIterator:
                     
                     # MODIFIED: Use min(|delta_k|, delta_max) for less conservative correction
                     # If delta_k is negative but small, use |delta_k| instead of delta_max
-                    delta_to_use = min(abs(delta_k), delta_max) if delta_k < 0 else delta_max
+                    delta_to_use = min(abs(delta_k), delta_max) #if delta_k < 0 else delta_max
                     epsilon_cons = (self.gamma * delta_to_use) / (1 - self.gamma)
                     
                     print(f"      Using δ_actual = {delta_to_use:.20e} (min of |δ^k|={abs(delta_k):.20e}, δ_max={delta_max:.20e})")
@@ -1129,7 +1129,7 @@ class SafetyValueIterator:
             # Apply conservative correction even if max iterations reached
             if conservative_mode:
                 # MODIFIED: Use min(|delta_k|, delta_max) when max iterations reached too
-                delta_to_use = min(abs(delta_k), delta_max) if delta_k < 0 else delta_max
+                delta_to_use = min(abs(delta_k), delta_max) #if delta_k < 0 else delta_max
                 epsilon_cons = (self.gamma * delta_to_use) / (1 - self.gamma)
                 
                 print(f"      Using δ_actual = {delta_to_use:.10e} for correction")
@@ -1252,7 +1252,7 @@ class AdaptiveRefinement:
                 f"delta-max_{args.delta_max}"
             )
             output_dir = os.path.join(
-                "./results_adaptive_optimized_new_odeint_car_plane_new_fixedhorizon_(dt_thenaddsucc)_new",
+                "./results_adaptive_optimized_new_odeint_car_plane_new_fixedhorizon_(dt_thenaddsucc)_new_if delta_k < 0 else delta_max",
                 f"{rname}_{param_suffix}"
             )
         self.output_dir = output_dir
