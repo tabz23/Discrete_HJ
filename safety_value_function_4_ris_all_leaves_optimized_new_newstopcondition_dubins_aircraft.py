@@ -664,6 +664,108 @@ def _initialize_cell_worker(args):
     l_upper = l_center + L_l * r
     
     return (cell_id, l_lower, l_upper)
+def _fix_angle_interval_standalone(left: float, right: float):
+    """Standalone version of fix_angle_interval for worker processes."""
+    while right < left:
+        right += 2 * np.pi
+    
+    if right - left >= 2 * np.pi - 0.01:
+        return -np.pi, np.pi
+    
+    while left < -np.pi or right < -np.pi:
+        left += 2 * np.pi
+        right += 2 * np.pi
+    
+    while left > 3 * np.pi or right > 3 * np.pi:
+        left -= 2 * np.pi
+        right -= 2 * np.pi
+    
+    while left > np.pi and right > np.pi:
+        left -= 2 * np.pi
+        right -= 2 * np.pi
+    
+    return left, right
+
+
+def _intervals_intersect_standalone(a_left: float, a_right: float, 
+                                    b_left: float, b_right: float) -> bool:
+    """Standalone version of intervals_intersect for worker processes."""
+    return not (a_right < b_left or b_right < a_left)
+
+
+def _precompute_successor_worker(task):
+    """
+    Worker function for parallel successor precomputation.
+    
+    Args:
+        task: Tuple of (cell_data, action, env, reachability_params, all_leaves_data)
+    
+    Returns:
+        Tuple of ((cell_id, action), list_of_successor_cell_ids)
+    """
+    cell_data, action, env, reachability_params, all_leaves_data = task
+    cell_id, bounds, center = cell_data
+    
+    # Unpack reachability parameters
+    tau, dt, growth_factors, use_infinity_norm = reachability_params
+    
+    # Compute cell radius
+    if use_infinity_norm:
+        ranges = bounds[:, 1] - bounds[:, 0]
+        r = 0.5 * np.max(ranges)
+    else:
+        ranges = bounds[:, 1] - bounds[:, 0]
+        r = 0.5 * np.linalg.norm(ranges)
+    
+    # Roll out dynamics to get checkpoint states
+    checkpoint_states = env.dynamics_multi_step(center, action, tau, dt)
+    
+    # Track unique successor cell IDs
+    successor_cell_ids = set()
+    
+    # For each checkpoint: compute reachable bounds and find successors
+    for i, state_at_checkpoint in enumerate(checkpoint_states):
+        growth_factor_i = growth_factors[i]
+        expansion_i = r * growth_factor_i
+        
+        # Compute reachable bounds at this checkpoint
+        reach_bounds = np.zeros((env.get_state_dim(), 2))
+        reach_bounds[0, 0] = state_at_checkpoint[0] - expansion_i
+        reach_bounds[0, 1] = state_at_checkpoint[0] + expansion_i
+        reach_bounds[1, 0] = state_at_checkpoint[1] - expansion_i
+        reach_bounds[1, 1] = state_at_checkpoint[1] + expansion_i
+        
+        # Handle theta dimension (for 3D state space)
+        if env.get_state_dim() == 3:
+            theta_lower = state_at_checkpoint[2] - expansion_i
+            theta_upper = state_at_checkpoint[2] + expansion_i
+            theta_lower, theta_upper = _fix_angle_interval_standalone(theta_lower, theta_upper)
+            reach_bounds[2, 0] = theta_lower
+            reach_bounds[2, 1] = theta_upper
+        
+        # Check all leaves for intersection
+        for candidate_id, candidate_bounds in all_leaves_data:
+            # Check x and y intersection
+            if (reach_bounds[0, 1] >= candidate_bounds[0, 0] and 
+                reach_bounds[0, 0] <= candidate_bounds[0, 1] and
+                reach_bounds[1, 1] >= candidate_bounds[1, 0] and 
+                reach_bounds[1, 0] <= candidate_bounds[1, 1]):
+                
+                # Check theta intersection if 3D
+                if env.get_state_dim() == 3:
+                    cand_theta_left, cand_theta_right = _fix_angle_interval_standalone(
+                        candidate_bounds[2, 0], candidate_bounds[2, 1]
+                    )
+                    reach_theta_left = reach_bounds[2, 0]
+                    reach_theta_right = reach_bounds[2, 1]
+                    
+                    if _intervals_intersect_standalone(cand_theta_left, cand_theta_right,
+                                                       reach_theta_left, reach_theta_right):
+                        successor_cell_ids.add(candidate_id)
+                else:
+                    successor_cell_ids.add(candidate_id)
+    
+    return ((cell_id, action), list(successor_cell_ids))
 
 
 # ============================================================================
@@ -713,23 +815,54 @@ class SafetyValueIterator:
             self.pool.join()
     
     def _precompute_all_successors(self):
-        """Precompute all successor sets using spatial index."""
-        print(f"\nPrecomputing successor sets with spatial index...")
+        """Precompute all successor sets using PARALLEL computation."""
+        print(f"\nPrecomputing successor sets with PARALLEL spatial index queries...")
         leaves = self.cell_tree.get_leaves()
         actions = self.env.get_action_space()
         
-        print(f"  Computing successors for {len(leaves)} cells × {len(actions)} actions")
+        n_tasks = len(leaves) * len(actions)
+        print(f"  Computing successors for {len(leaves)} cells × {len(actions)} actions = {n_tasks} tasks")
         start_time = time.time()
         
+        # Prepare reachability parameters (lightweight data)
+        reachability_params = (
+            self.reachability.tau,
+            self.reachability.dt,
+            self.reachability.growth_factors,
+            self.reachability.use_infinity_norm
+        )
+        
+        # Prepare leaf data for workers (cell_id, bounds only - no full Cell objects)
+        all_leaves_data = [(c.cell_id, c.bounds.copy()) for c in leaves]
+        
+        # Prepare all tasks
+        tasks = []
         for cell in leaves:
+            cell_data = (cell.cell_id, cell.bounds.copy(), cell.center.copy())
             for action in actions:
-                successors = self.reachability.compute_successor_cells(cell, action, self.cell_tree)
-                key = (cell.cell_id, action)
-                self.successor_cache[key] = [s.cell_id for s in successors]
+                tasks.append((cell_data, action, self.env, reachability_params, all_leaves_data))
+        
+        print(f"  Launching {len(tasks)} parallel tasks with {self.n_workers} workers...")
+        
+        # Compute chunk size for better load balancing
+        chunksize = max(1, len(tasks) // (self.n_workers * 4))
+        
+        # Use persistent pool if available, otherwise create temporary one
+        if self.pool is not None:
+            results = self.pool.map(_precompute_successor_worker, tasks, chunksize=chunksize)
+        else:
+            with Pool(self.n_workers) as pool:
+                results = pool.map(_precompute_successor_worker, tasks, chunksize=chunksize)
+        
+        # Store results in cache
+        for (cell_id, action), successor_ids in results:
+            self.successor_cache[(cell_id, action)] = successor_ids
         
         elapsed = time.time() - start_time
         print(f"  ✓ Precomputed {len(self.successor_cache)} successor sets in {elapsed:.2f}s")
-    
+        print(f"    Throughput: {len(tasks)/elapsed:.1f} tasks/s")
+
+
     def initialize_cells(self):
         """Initialize stage cost bounds for all cells (parallelized)."""
         leaves = self.cell_tree.get_leaves()
@@ -1150,11 +1283,11 @@ class SafetyValueIterator:
         
         return np.array(conv_history_upper), np.array(conv_history_lower)
     def _update_successor_cache_for_new_cells(self, new_cells: Set[Cell]):
-        """Update successor cache after refinement."""
+        """Update successor cache for new cells after refinement (PARALLELIZED)."""
         if not new_cells:
             return
         
-        print(f"  Updating successor cache for {len(new_cells)} new cells...")
+        print(f"    Updating successor cache for {len(new_cells)} new cells...")
         start_time = time.time()
         
         actions = self.env.get_action_space()
@@ -1177,7 +1310,7 @@ class SafetyValueIterator:
         for key in keys_to_delete:
             del self.successor_cache[key]
         
-        # Recompute successors for all affected cells
+        # Identify all affected cells that need recomputation
         affected_cells = set(new_cells)
         all_leaves = self.cell_tree.get_leaves()
         for cell in all_leaves:
@@ -1187,14 +1320,40 @@ class SafetyValueIterator:
                     affected_cells.add(cell)
                     break
         
+        # Prepare reachability parameters
+        reachability_params = (
+            self.reachability.tau,
+            self.reachability.dt,
+            self.reachability.growth_factors,
+            self.reachability.use_infinity_norm
+        )
+        
+        # Prepare leaf data
+        all_leaves_data = [(c.cell_id, c.bounds.copy()) for c in all_leaves]
+        
+        # Prepare tasks for affected cells
+        tasks = []
         for cell in affected_cells:
+            cell_data = (cell.cell_id, cell.bounds.copy(), cell.center.copy())
             for action in actions:
-                successors = self.reachability.compute_successor_cells(cell, action, self.cell_tree)
-                key = (cell.cell_id, action)
-                self.successor_cache[key] = [s.cell_id for s in successors]
+                tasks.append((cell_data, action, self.env, reachability_params, all_leaves_data))
+        
+        # Parallel computation
+        chunksize = max(1, len(tasks) // (self.n_workers * 4))
+        if self.pool is not None:
+            results = self.pool.map(_precompute_successor_worker, tasks, chunksize=chunksize)
+        else:
+            with Pool(self.n_workers) as pool:
+                results = pool.map(_precompute_successor_worker, tasks, chunksize=chunksize)
+        
+        # Update cache
+        for (cell_id, action), successor_ids in results:
+            self.successor_cache[(cell_id, action)] = successor_ids
         
         elapsed = time.time() - start_time
-        print(f"  ✓ Cache updated in {elapsed:.2f}s")
+        print(f"    ✓ Cache updated in {elapsed:.2f}s ({len(tasks)/elapsed:.1f} tasks/s)")
+
+
             
     def _identify_boundary_cells(self) -> List[Cell]:
         """Identify boundary cells where V̄_γ(s) > 0 and V_γ(s) < 0."""
