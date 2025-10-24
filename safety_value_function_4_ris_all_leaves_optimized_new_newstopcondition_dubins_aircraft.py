@@ -692,6 +692,14 @@ def _intervals_intersect_standalone(a_left: float, a_right: float,
     """Standalone version of intervals_intersect for worker processes."""
     return not (a_right < b_left or b_right < a_left)
 
+def _compute_checkpoint_worker(task):
+    """
+    Worker: Compute checkpoint states only (ODE integration).
+    Returns trajectory for later successor computation.
+    """
+    cell_id, center, action, env, tau, dt = task
+    checkpoint_states = env.dynamics_multi_step(center, action, tau, dt)
+    return (cell_id, action, checkpoint_states)
 
 def _precompute_successor_worker(task):
     """
@@ -815,54 +823,100 @@ class SafetyValueIterator:
             self.pool.join()
     
     def _precompute_all_successors(self):
-        """Precompute all successor sets using PARALLEL computation."""
-        print(f"\nPrecomputing successor sets with PARALLEL spatial index queries...")
+        """
+        HYBRID: Parallel ODE integration + Sequential spatial index queries.
+        Achieves O(N log N) complexity instead of O(N²).
+        """
+        print(f"\nPrecomputing successor sets with HYBRID approach...")
         leaves = self.cell_tree.get_leaves()
         actions = self.env.get_action_space()
         
         n_tasks = len(leaves) * len(actions)
-        print(f"  Computing successors for {len(leaves)} cells × {len(actions)} actions = {n_tasks} tasks")
+        print(f"  Step 1: Computing {n_tasks} trajectories in parallel...")
         start_time = time.time()
         
-        # Prepare reachability parameters (lightweight data)
-        reachability_params = (
-            self.reachability.tau,
-            self.reachability.dt,
-            self.reachability.growth_factors,
-            self.reachability.use_infinity_norm
-        )
-        
-        # Prepare leaf data for workers (cell_id, bounds only - no full Cell objects)
-        all_leaves_data = [(c.cell_id, c.bounds.copy()) for c in leaves]
-        
-        # Prepare all tasks
-        tasks = []
+        # STEP 1: Parallel ODE integration (expensive part)
+        ode_tasks = []
         for cell in leaves:
-            cell_data = (cell.cell_id, cell.bounds.copy(), cell.center.copy())
             for action in actions:
-                tasks.append((cell_data, action, self.env, reachability_params, all_leaves_data))
+                ode_tasks.append((
+                    cell.cell_id, 
+                    cell.center.copy(), 
+                    action, 
+                    self.env, 
+                    self.reachability.tau, 
+                    self.reachability.dt
+                ))
         
-        print(f"  Launching {len(tasks)} parallel tasks with {self.n_workers} workers...")
+        chunksize = max(1, len(ode_tasks) // (self.n_workers * 4))
         
-        # Compute chunk size for better load balancing
-        chunksize = max(1, len(tasks) // (self.n_workers * 4))
-        
-        # Use persistent pool if available, otherwise create temporary one
         if self.pool is not None:
-            results = self.pool.map(_precompute_successor_worker, tasks, chunksize=chunksize)
+            trajectory_results = self.pool.map(_compute_checkpoint_worker, ode_tasks, chunksize=chunksize)
         else:
             with Pool(self.n_workers) as pool:
-                results = pool.map(_precompute_successor_worker, tasks, chunksize=chunksize)
+                trajectory_results = pool.map(_compute_checkpoint_worker, ode_tasks, chunksize=chunksize)
         
-        # Store results in cache
-        for (cell_id, action), successor_ids in results:
-            self.successor_cache[(cell_id, action)] = successor_ids
+        ode_time = time.time() - start_time
+        print(f"  ✓ Trajectories computed in {ode_time:.2f}s ({len(ode_tasks)/ode_time:.1f} tasks/s)")
         
+        # STEP 2: Sequential successor queries using spatial index (fast!)
+        print(f"  Step 2: Computing successors using spatial index...")
+        query_start = time.time()
+        
+        # Build cell lookup
+        cell_dict = {cell.cell_id: cell for cell in leaves}
+        
+        for cell_id, action, checkpoint_states in trajectory_results:
+            cell = cell_dict[cell_id]
+            
+            # Compute cell radius
+            if self.reachability.use_infinity_norm:
+                r = 0.5 * cell.get_max_range()
+            else:
+                ranges = np.array([cell.get_range(j) for j in range(len(cell.bounds))])
+                r = 0.5 * np.linalg.norm(ranges)
+            
+            # Track unique successor cell IDs
+            successor_cell_ids = set()
+            
+            # For each checkpoint: compute reachable bounds and query spatial index
+            for i, state_at_checkpoint in enumerate(checkpoint_states):
+                growth_factor_i = self.reachability.growth_factors[i]
+                expansion_i = r * growth_factor_i
+                
+                # Compute reachable bounds at this checkpoint
+                reach_bounds = np.zeros((self.env.get_state_dim(), 2))
+                reach_bounds[0, 0] = state_at_checkpoint[0] - expansion_i
+                reach_bounds[0, 1] = state_at_checkpoint[0] + expansion_i
+                reach_bounds[1, 0] = state_at_checkpoint[1] - expansion_i
+                reach_bounds[1, 1] = state_at_checkpoint[1] + expansion_i
+                
+                # θ bounds (with normalization)
+                if self.env.get_state_dim() == 3:
+                    theta_lower = state_at_checkpoint[2] - expansion_i
+                    theta_upper = state_at_checkpoint[2] + expansion_i
+                    theta_lower, theta_upper = self.reachability.fix_angle_interval(theta_lower, theta_upper)
+                    reach_bounds[2, 0] = theta_lower
+                    reach_bounds[2, 1] = theta_upper
+                
+                # USE SPATIAL INDEX: O(log N) instead of O(N)!
+                candidates = self.cell_tree.get_intersecting_cells(reach_bounds)
+                
+                # Filter by theta intersection
+                for candidate in candidates:
+                    if self.reachability._check_theta_intersection(candidate, reach_bounds):
+                        successor_cell_ids.add(candidate.cell_id)
+            
+            # Store in cache
+            key = (cell_id, action)
+            self.successor_cache[key] = list(successor_cell_ids)
+        
+        query_time = time.time() - query_start
         elapsed = time.time() - start_time
-        print(f"  ✓ Precomputed {len(self.successor_cache)} successor sets in {elapsed:.2f}s")
-        print(f"    Throughput: {len(tasks)/elapsed:.1f} tasks/s")
-
-
+        
+        print(f"  ✓ Spatial queries completed in {query_time:.2f}s")
+        print(f"  ✓ Total precomputation: {elapsed:.2f}s ({n_tasks/elapsed:.1f} tasks/s)")
+        print(f"    Breakdown: {ode_time/elapsed*100:.1f}% ODE, {query_time/elapsed*100:.1f}% queries")
     def initialize_cells(self):
         """Initialize stage cost bounds for all cells (parallelized)."""
         leaves = self.cell_tree.get_leaves()
@@ -1283,11 +1337,11 @@ class SafetyValueIterator:
         
         return np.array(conv_history_upper), np.array(conv_history_lower)
     def _update_successor_cache_for_new_cells(self, new_cells: Set[Cell]):
-        """Update successor cache for new cells after refinement (PARALLELIZED)."""
+        """Update successor cache using HYBRID approach (parallel ODE + spatial index)."""
         if not new_cells:
             return
         
-        print(f"    Updating successor cache for {len(new_cells)} new cells...")
+        print(f"    Updating successor cache for {len(new_cells)} new cells (HYBRID)...")
         start_time = time.time()
         
         actions = self.env.get_action_space()
@@ -1298,7 +1352,7 @@ class SafetyValueIterator:
             if cell.parent is not None:
                 refined_parent_ids.add(cell.parent.cell_id)
         
-        # Remove all cache entries involving refined parents
+        # Remove cache for refined parents AND cells pointing to them
         keys_to_delete = []
         for key in self.successor_cache.keys():
             cell_id, action = key
@@ -1310,7 +1364,7 @@ class SafetyValueIterator:
         for key in keys_to_delete:
             del self.successor_cache[key]
         
-        # Identify all affected cells that need recomputation
+        # Find all affected cells
         affected_cells = set(new_cells)
         all_leaves = self.cell_tree.get_leaves()
         for cell in all_leaves:
@@ -1320,39 +1374,72 @@ class SafetyValueIterator:
                     affected_cells.add(cell)
                     break
         
-        # Prepare reachability parameters
-        reachability_params = (
-            self.reachability.tau,
-            self.reachability.dt,
-            self.reachability.growth_factors,
-            self.reachability.use_infinity_norm
-        )
+        print(f"      Affected cells: {len(affected_cells)}")
         
-        # Prepare leaf data
-        all_leaves_data = [(c.cell_id, c.bounds.copy()) for c in all_leaves]
-        
-        # Prepare tasks for affected cells
-        tasks = []
+        # STEP 1: Parallel ODE integration
+        ode_tasks = []
         for cell in affected_cells:
-            cell_data = (cell.cell_id, cell.bounds.copy(), cell.center.copy())
             for action in actions:
-                tasks.append((cell_data, action, self.env, reachability_params, all_leaves_data))
+                ode_tasks.append((
+                    cell.cell_id,
+                    cell.center.copy(),
+                    action,
+                    self.env,
+                    self.reachability.tau,
+                    self.reachability.dt
+                ))
         
-        # Parallel computation
-        chunksize = max(1, len(tasks) // (self.n_workers * 4))
+        chunksize = max(1, len(ode_tasks) // (self.n_workers * 4))
         if self.pool is not None:
-            results = self.pool.map(_precompute_successor_worker, tasks, chunksize=chunksize)
+            trajectory_results = self.pool.map(_compute_checkpoint_worker, ode_tasks, chunksize=chunksize)
         else:
             with Pool(self.n_workers) as pool:
-                results = pool.map(_precompute_successor_worker, tasks, chunksize=chunksize)
+                trajectory_results = pool.map(_compute_checkpoint_worker, ode_tasks, chunksize=chunksize)
         
-        # Update cache
-        for (cell_id, action), successor_ids in results:
-            self.successor_cache[(cell_id, action)] = successor_ids
+        # STEP 2: Sequential successor queries using spatial index
+        cell_dict = {cell.cell_id: cell for cell in all_leaves}
+        
+        for cell_id, action, checkpoint_states in trajectory_results:
+            cell = cell_dict[cell_id]
+            
+            # Compute cell radius
+            if self.reachability.use_infinity_norm:
+                r = 0.5 * cell.get_max_range()
+            else:
+                ranges = np.array([cell.get_range(j) for j in range(len(cell.bounds))])
+                r = 0.5 * np.linalg.norm(ranges)
+            
+            successor_cell_ids = set()
+            
+            for i, state_at_checkpoint in enumerate(checkpoint_states):
+                growth_factor_i = self.reachability.growth_factors[i]
+                expansion_i = r * growth_factor_i
+                
+                reach_bounds = np.zeros((self.env.get_state_dim(), 2))
+                reach_bounds[0, 0] = state_at_checkpoint[0] - expansion_i
+                reach_bounds[0, 1] = state_at_checkpoint[0] + expansion_i
+                reach_bounds[1, 0] = state_at_checkpoint[1] - expansion_i
+                reach_bounds[1, 1] = state_at_checkpoint[1] + expansion_i
+                
+                if self.env.get_state_dim() == 3:
+                    theta_lower = state_at_checkpoint[2] - expansion_i
+                    theta_upper = state_at_checkpoint[2] + expansion_i
+                    theta_lower, theta_upper = self.reachability.fix_angle_interval(theta_lower, theta_upper)
+                    reach_bounds[2, 0] = theta_lower
+                    reach_bounds[2, 1] = theta_upper
+                
+                # USE SPATIAL INDEX
+                candidates = self.cell_tree.get_intersecting_cells(reach_bounds)
+                
+                for candidate in candidates:
+                    if self.reachability._check_theta_intersection(candidate, reach_bounds):
+                        successor_cell_ids.add(candidate.cell_id)
+            
+            key = (cell_id, action)
+            self.successor_cache[key] = list(successor_cell_ids)
         
         elapsed = time.time() - start_time
-        print(f"    ✓ Cache updated in {elapsed:.2f}s ({len(tasks)/elapsed:.1f} tasks/s)")
-
+        print(f"    ✓ Cache updated in {elapsed:.2f}s ({len(ode_tasks)/elapsed:.1f} tasks/s)")
 
             
     def _identify_boundary_cells(self) -> List[Cell]:
