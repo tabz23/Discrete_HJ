@@ -211,8 +211,8 @@ class EvasionEnvironment(Environment):
             )
 
         if state_bounds is None:
-            self.state_bounds = np.array([[-5.0, 5.0],
-                                          [-5.0, 5.0],
+            self.state_bounds = np.array([[-3.0, 3.0],##changed this 
+                                          [-3.0, 3.0],##changed this
                                           [-np.pi, np.pi]])
         else:
             self.state_bounds = state_bounds
@@ -639,6 +639,8 @@ def _bellman_update_optimized(task, shared_data):
         
         if action_lower > best_min_val:
             best_min_val = action_lower
+
+        if action_upper > best_max_val:  #  Independent update. check if this was causing noncontraction in Vupper
             best_max_val = action_upper
     
     new_V_lower = min(l_lower, best_min_val) if best_min_val > -np.inf else l_lower
@@ -1496,6 +1498,7 @@ class AdaptiveRefinement:
                 f"vi-iterations_{args.vi_iterations}"
                 f"conservative_{args.conservative}"
                 f"delta-max_{args.delta_max}"
+                f"init_resol_{args.initial_resolution}"
             )
             output_dir = os.path.join(
                 "./results_adaptive_optimized_new_odeint_car_plane_new_fixedhorizon_(dt_thenaddsucc)_new_if delta_k < 0 else delta_max",
@@ -1726,7 +1729,7 @@ def plot_value_function(
         theta_slices = [0, np.pi/4, np.pi/2, np.pi]
     
     n_slices = len(theta_slices)
-    fig, axes = plt.subplots(3, n_slices, figsize=(5*n_slices, 14))
+    fig, axes = plt.subplots(3, n_slices, figsize=(5*n_slices, 14),dpi=800)
     
     if n_slices == 1:
         axes = axes.reshape(3, 1)
@@ -1749,7 +1752,7 @@ def plot_value_function(
     
     fig.suptitle(f"Safety Value Function - Iteration {iteration}", fontsize=16, y=0.995)
     plt.tight_layout()
-    plt.savefig(filename, dpi=150, bbox_inches='tight')
+    plt.savefig(filename, dpi=800, bbox_inches='tight')
     plt.close()
 
 def _plot_slice(
@@ -1823,13 +1826,13 @@ def _plot_slice(
         # mixed sign values
         norm = Normalize(vmin=vmin, vmax=vmax)
 
-    # Plot each cell as a colored rectangle
+    # # Plot each cell as a colored rectangle
     for cell, value in relevant_cells:
         a_x, b_x = cell.bounds[0]
         a_y, b_y = cell.bounds[1]
         color = cmap(norm(value))
         rect = Rectangle((a_x, a_y), b_x - a_x, b_y - a_y,
-                         facecolor=color, edgecolor='black', linewidth=1, alpha=1.0)
+                         facecolor=color, edgecolor='black', linewidth=0.005,antialiased=False, alpha=1.0)
         ax.add_patch(rect)
 
     # Draw obstacle
@@ -1925,13 +1928,20 @@ def _plot_classification_slice(
         else:
             color = C_BOUND
         
-        # Draw colored rectangle
+
+        # Draw rectangle directly on the provided axes
         rect = Rectangle(
             (cell.bounds[0, 0], cell.bounds[1, 0]),
             cell.get_range(0), cell.get_range(1),
-            facecolor=color, edgecolor='none', alpha=1.0
+            facecolor=color,
+            edgecolor='black',     # crisp outline
+            linewidth=0.005,         # fine lines for dense grids
+            antialiased=False,
+            alpha=1.0
         )
         ax.add_patch(rect)
+
+
     
     # Draw obstacle
     
@@ -1966,12 +1976,12 @@ def _plot_classification_slice(
     ax.grid(False)
     
     # Legend
-    legend_elems = [
-        Patch(facecolor=C_SAFE, edgecolor='black', label='Safe (V_>0)'),
-        Patch(facecolor=C_UNSAFE, edgecolor='black', label='Unsafe (V̄<0)'),
-        Patch(facecolor=C_BOUND, edgecolor='black', label='Boundary (mixed)')
-    ]
-    ax.legend(handles=legend_elems, loc='upper right', fontsize=8)
+    # legend_elems = [
+    #     Patch(facecolor=C_SAFE, edgecolor='black', label='Safe (V_>0)'),
+    #     Patch(facecolor=C_UNSAFE, edgecolor='black', label='Unsafe (V̄<0)'),
+    #     Patch(facecolor=C_BOUND, edgecolor='black', label='Boundary (mixed)')
+    # ]
+    # ax.legend(handles=legend_elems, loc='upper right', fontsize=8)
 
 
 # ============================================================================
