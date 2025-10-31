@@ -1837,11 +1837,11 @@ def _plot_slice(
 
     # Draw obstacle
     if isinstance(env, DubinsCarEnvironment):
-        obstacle = Circle(env.obstacle_position, env.obstacle_radius,
+        obstacle = Circle(env.obstacle_position, env.obstacle_radius, #make them consistent TODO
                           facecolor='none', edgecolor='darkblue', linewidth=2, zorder=10)
     elif isinstance(env, EvasionEnvironment):
-        obstacle = Circle((0, 0), env.obstacle_radius,
-                          facecolor='none', edgecolor='darkred', linestyle='--', linewidth=2, zorder=10)
+        obstacle = Circle(env.obstacle_position, env.obstacle_radius, #make them consistent TODO
+                          facecolor='none', edgecolor='darkblue', linewidth=2, zorder=10)
     ax.add_patch(obstacle)
 
     ax.set_xlabel('x')
@@ -1960,8 +1960,7 @@ def _plot_classification_slice(
             (0, 0),
             env.obstacle_radius,
             facecolor='none',
-            edgecolor='darkred',
-            linestyle='--',
+            edgecolor='darkblue',
             linewidth=2,
             zorder=10
         )
