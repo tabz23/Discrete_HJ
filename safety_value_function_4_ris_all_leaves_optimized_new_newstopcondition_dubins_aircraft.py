@@ -77,7 +77,12 @@ class Environment(ABC):
         pass
     
     @abstractmethod
-    def get_lipschitz_constants(self) -> Tuple[float, float]:
+    def reward_function(self, state: np.ndarray) -> float:  ##changed for RA case
+        """Return reward value at state. Positive if in target set."""  ##changed for RA case
+        pass  ##changed for RA case
+    
+    @abstractmethod
+    def get_lipschitz_constants(self) -> Tuple[float, float, float]:  ##changed for RA case - now returns (L_f, L_l, L_r)
         pass
     
     @abstractmethod
@@ -87,13 +92,13 @@ class Environment(ABC):
 # ----------------------------------------------------------------------------
 # Dubins Car Environment (Unchanged)
 # ----------------------------------------------------------------------------
-class DubinsCarEnvironment(Environment):
-    """Dubins car with constant velocity navigating around a circular obstacle."""
-    
+
 class DubinsCarEnvironment(Environment):
     def __init__(self, v_const: float = 1.0, dt: float = 0.1, tau: float = 1.0,
                  state_bounds: np.ndarray = None, obstacle_position: np.ndarray = None,
-                 obstacle_radius: float = 0.5):
+                 obstacle_radius: float = 0.5,
+                 target_position: np.ndarray = None, target_radius: float = 0.5):  ##changed for RA case - added target params
+                 
         
         # Validate before anything else
         ratio = tau / dt
@@ -126,9 +131,17 @@ class DubinsCarEnvironment(Environment):
             
         self.obstacle_radius = obstacle_radius
         
+        # Target set parameters  ##changed for RA case
+        if target_position is None:  ##changed for RA case
+            self.target_position = np.array([2.5, 0])  ##changed for RA case
+        else:  ##changed for RA case
+            self.target_position = target_position  ##changed for RA case
+            
+        self.target_radius = target_radius  ##changed for RA case
         # Lipschitz constants
         self.L_f = v_const
         self.L_l = np.sqrt(2)
+        self.L_r = np.sqrt(2)  ##changed for RA case - same as L_l since target is also a circle
         self.actions = [-1.0, 0.0, 1.0]
     
     def get_state_bounds(self) -> np.ndarray:
@@ -178,8 +191,14 @@ class DubinsCarEnvironment(Environment):
         dist_to_obstacle = np.linalg.norm(pos - self.obstacle_position)
         return (dist_to_obstacle - self.obstacle_radius)
     
-    def get_lipschitz_constants(self) -> Tuple[float, float]:
-        return self.L_f, self.L_l
+    def reward_function(self, state: np.ndarray) -> float:  ##changed for RA case
+        """Negative signed distance to target circle (positive inside target)"""  ##changed for RA case
+        pos = state[:2]  ##changed for RA case
+        dist_to_target = np.linalg.norm(pos - self.target_position)  ##changed for RA case
+        return -(dist_to_target - self.target_radius)  ##changed for RA case
+    
+    def get_lipschitz_constants(self) -> Tuple[float, float, float]:  ##changed for RA case
+        return self.L_f, self.L_l, self.L_r  ##changed for RA case
     
     def get_state_dim(self) -> int:
         return 3
@@ -220,6 +239,8 @@ class EvasionEnvironment(Environment):
         self.actions = np.linspace(-1.0, 1.0, 5)
         self.L_f = 1 + self.v_const
         self.L_l = np.sqrt(2)
+        self.L_r = 0.0  ##changed for RA case - reward is constant (always 1), so Lipschitz constant is 0
+
 
     def get_state_bounds(self) -> np.ndarray:
         return self.state_bounds
@@ -266,9 +287,13 @@ class EvasionEnvironment(Environment):
         x1, x2, _ = state
         dx, dy = x1 - self.obstacle_position[0], x2 - self.obstacle_position[1]
         return np.sqrt(dx**2 + dy**2) - self.obstacle_radius
+    
+    def reward_function(self, state: np.ndarray) -> float:  ##changed for RA case
+        """Constant reward of 1 (inherently reach-avoid, no explicit target)"""  ##changed for RA case
+        return -np.inf  ##changed for RA case
 
-    def get_lipschitz_constants(self) -> Tuple[float, float]:
-        return self.L_f, self.L_l
+    def get_lipschitz_constants(self) -> Tuple[float, float, float]:  ##changed for RA case
+        return self.L_f, self.L_l, self.L_r  ##changed for RA case
 
     def get_state_dim(self) -> int:
         return 3
@@ -291,6 +316,8 @@ class Cell:
         self.V_lower = None
         self.l_upper = None
         self.l_lower = None
+        self.r_upper = None  ##changed for RA case
+        self.r_lower = None  ##changed for RA case
         
         self.children = []
         self.is_leaf = True
@@ -380,6 +407,11 @@ class CellTree:
         """Build R-tree spatial index for fast intersection queries."""
         print(f"  Building spatial index for {len(self.leaves)} cells...")
         start_time = time.time()
+        # ============ ADD INTEGRITY CHECK AT START ============
+        non_leaves_at_start = [c for c in self.leaves if not c.is_leaf]
+        if non_leaves_at_start:
+            print(f"    ⚠️  WARNING: {len(non_leaves_at_start)} non-leaf cells at START of _build_spatial_index!")
+    # ======================================================
         
         import rtree
         
@@ -393,6 +425,11 @@ class CellTree:
         
         # Insert all leaf cells
         for i, cell in enumerate(self.leaves):
+            # ============ ADD CHECK DURING ITERATION ============
+            if not cell.is_leaf:
+                print(f"    ⚠️  Inserting NON-LEAF Cell {cell.cell_id} into spatial index!")
+            # ====================================================
+        
             bbox = (
                 cell.bounds[0, 0], cell.bounds[1, 0], cell.bounds[2, 0],
                 cell.bounds[0, 1], cell.bounds[1, 1], cell.bounds[2, 1]
@@ -424,21 +461,59 @@ class CellTree:
         """Rebuild spatial index after refinements."""
         self._build_spatial_index()
     
+    # def get_intersecting_cells(self, bounds: np.ndarray) -> List[Cell]:
+    #     """
+    #     Fast intersection query using spatial index.
+    #     """
+    #     if self.spatial_index is None:
+    #         return [cell for cell in self.leaves if cell.intersects(bounds)]
+        
+    #     query_bbox = (
+    #         bounds[0, 0], bounds[1, 0], bounds[2, 0],
+    #         bounds[0, 1], bounds[1, 1], bounds[2, 1]
+    #     )
+        
+    #     hit_indices = list(self.spatial_index.intersection(query_bbox))
+    #     return [self.leaves[i] for i in hit_indices]
     def get_intersecting_cells(self, bounds: np.ndarray) -> List[Cell]:
         """
-        Fast intersection query using spatial index.
+        Fast intersection query using spatial index (handles theta wrapping).
         """
         if self.spatial_index is None:
             return [cell for cell in self.leaves if cell.intersects(bounds)]
         
-        query_bbox = (
-            bounds[0, 0], bounds[1, 0], bounds[2, 0],
-            bounds[0, 1], bounds[1, 1], bounds[2, 1]
-        )
+        # For theta dimension, we may need to query with wrapped versions
+        theta_min, theta_max = bounds[2, 0], bounds[2, 1]
         
+        # Collect all candidates from multiple queries
+        all_candidates = set()
+        
+        # Query 1: Original bounds
+        query_bbox = (
+            bounds[0, 0], bounds[1, 0], theta_min,
+            bounds[0, 1], bounds[1, 1], theta_max
+        )
         hit_indices = list(self.spatial_index.intersection(query_bbox))
-        return [self.leaves[i] for i in hit_indices]
-    
+        all_candidates.update(hit_indices)
+        
+        # Query 2: Wrap theta by -2π (shift left)
+        query_bbox_wrapped_neg = (
+            bounds[0, 0], bounds[1, 0], theta_min - 2*np.pi,
+            bounds[0, 1], bounds[1, 1], theta_max - 2*np.pi
+        )
+        hit_indices = list(self.spatial_index.intersection(query_bbox_wrapped_neg))
+        all_candidates.update(hit_indices)
+        
+        # Query 3: Wrap theta by +2π (shift right)
+        query_bbox_wrapped_pos = (
+            bounds[0, 0], bounds[1, 0], theta_min + 2*np.pi,
+            bounds[0, 1], bounds[1, 1], theta_max + 2*np.pi
+        )
+        hit_indices = list(self.spatial_index.intersection(query_bbox_wrapped_pos))
+        all_candidates.update(hit_indices)
+        
+        return [self.leaves[i] for i in all_candidates]
+        
     def get_num_leaves(self) -> int:
         return len(self.leaves)
 
@@ -456,7 +531,7 @@ class GronwallReachabilityAnalyzer:
         self.use_infinity_norm = use_infinity_norm
         self.debug_verify = debug_verify
         
-        L_f, _ = env.get_lipschitz_constants()
+        L_f, _, _ = env.get_lipschitz_constants()
         self.L = L_f
         self.dt = env.dt      # Checkpoint interval
         self.tau = env.tau    # Control horizon
@@ -468,7 +543,7 @@ class GronwallReachabilityAnalyzer:
         self.checkpoint_times = np.linspace(self.dt, self.tau, self.n_checkpoints)
         
         # Growth factors for each checkpoint
-        self.growth_factors = [np.exp(self.L * t) for t in self.checkpoint_times]
+        self.growth_factors = [np.exp(self.L * t) for t in self.checkpoint_times]#[0.2 for t in self.checkpoint_times]#
         
         # Debug statistics
         self.debug_query_count = 0
@@ -482,115 +557,164 @@ class GronwallReachabilityAnalyzer:
         print(f"  Checkpoint times: {[f'{t:.3f}' for t in self.checkpoint_times]}")
         print(f"  Growth factors: {[f'{gf:.6f}' for gf in self.growth_factors]}")
     
-    @staticmethod
-    def fix_angle_interval(left_angle: float, right_angle: float) -> Tuple[float, float]:
-        """Normalize an angle interval to a canonical form."""
-        if abs(right_angle - left_angle) < 0.001:
-            left_angle = right_angle - 0.01
-        
-        while right_angle < left_angle:
-            right_angle += 2 * np.pi
-        
-        if right_angle - left_angle >= 2 * np.pi - 0.01:
-            return -np.pi, np.pi
-        
-        while left_angle < -np.pi or right_angle < -np.pi:
-            left_angle += 2 * np.pi
-            right_angle += 2 * np.pi
-        
-        while left_angle > 3 * np.pi or right_angle > 3 * np.pi:
-            left_angle -= 2 * np.pi
-            right_angle -= 2 * np.pi
-        
-        while left_angle > np.pi and right_angle > np.pi:
-            left_angle -= 2 * np.pi
-            right_angle -= 2 * np.pi
-        
-        return left_angle, right_angle
+    # @staticmethod
+    # def fix_angle_interval(left_angle: float, right_angle: float) -> Tuple[float, float]:
+    # #to check , this doesnt necessarily normalize to [-π, π] Actual range: [-π, 3π] for example
+    # #for example left_angle = 1.0 right_angle = 4.0 is returned as [1,4]
+    # #since:    
+    # # Step 1: if abs(4.0 - 1.0) < 0.001  →  if 3.0 < 0.001  →  FALSE ✗
     
+    # # Step 2: while 4.0 < 1.0  →  FALSE 
+    
+    # # Step 3: if 3.0 >= 6.273  →  FALSE 
+    
+    # # Step 4: while (1.0 < -3.14 or 4.0 < -3.14)  →  FALSE 
+    
+    # # Step 5: while (1.0 > 9.42 or 4.0 > 9.42)  →  FALSE 
+    
+    # # Step 6: while (1.0 > 3.14 and 4.0 > 3.14)  →  FALSE 
+    
+    # #NOW SAY WE HAVE # Cell bounds (after fix_angle_interval): [1.0, 4.0] AND other cell Reachable bounds: [-3.0, -1.0]
+    # #then need to Shift Reachable by +2π to know that they intersect
+    # #[1.0, 4.0] and [-3.0 + 2π, -1.0 + 2π]=[3.28,5,28] then not they interesect
+    #     """Normalize an angle interval to a canonical form."""
+    #     if abs(right_angle - left_angle) < 0.001:
+    #         left_angle = right_angle - 0.01
+        
+    #     while right_angle < left_angle:
+    #         right_angle += 2 * np.pi
+        
+    #     if right_angle - left_angle >= 2 * np.pi - 0.01:
+    #         return -np.pi, np.pi
+        
+    #     while left_angle < -np.pi or right_angle < -np.pi:
+    #         left_angle += 2 * np.pi
+    #         right_angle += 2 * np.pi
+        
+    #     while left_angle > 3 * np.pi or right_angle > 3 * np.pi:
+    #         left_angle -= 2 * np.pi
+    #         right_angle -= 2 * np.pi
+        
+    #     while left_angle > np.pi and right_angle > np.pi:
+    #         left_angle -= 2 * np.pi
+    #         right_angle -= 2 * np.pi
+        
+    #     return left_angle, right_angle
+    
+    # @staticmethod
+    # def intervals_intersect(a_left: float, a_right: float, 
+    #                       b_left: float, b_right: float) -> bool:
+    #     """Check if two angle intervals intersect."""
+    #     return not (a_right < b_left or b_right < a_left)
     @staticmethod
     def intervals_intersect(a_left: float, a_right: float, 
-                          b_left: float, b_right: float) -> bool:
-        """Check if two angle intervals intersect."""
-        return not (a_right < b_left or b_right < a_left)
+                        b_left: float, b_right: float) -> bool:
+        """Check if two angle intervals intersect (handles wrapping)."""
+        # Standard intersection
+        if not (a_right < b_left or b_right < a_left):
+            return True
+        
+        # Check with b wrapped by +2π
+        if not (a_right < b_left + 2*np.pi or b_right + 2*np.pi < a_left):
+            return True
+        
+        # Check with b wrapped by -2π
+        if not (a_right < b_left - 2*np.pi or b_right - 2*np.pi < a_left):
+            return True
+        
+        return False
     
-    def _check_theta_intersection(self, candidate: Cell, reach_bounds: np.ndarray) -> bool:
-        """Helper: Check if theta dimension intersects."""
-        cand_theta_left, cand_theta_right = self.fix_angle_interval(
-            candidate.bounds[2, 0], 
-            candidate.bounds[2, 1]
-        )
-        reach_theta_left = reach_bounds[2, 0]
-        reach_theta_right = reach_bounds[2, 1]
+    # def _check_theta_intersection(self, candidate: Cell, reach_bounds: np.ndarray) -> bool:
+    #     """Helper: Check if theta dimension intersects."""
         
-        return self.intervals_intersect(
-            cand_theta_left, cand_theta_right,
-            reach_theta_left, reach_theta_right
-        )
+    #     ##added for debugging
+    #     original_left = candidate.bounds[2, 0]
+    #     original_right = candidate.bounds[2, 1]
+    #     ##added for debugging
+    #     cand_theta_left, cand_theta_right = self.fix_angle_interval(
+    #         candidate.bounds[2, 0], 
+    #         candidate.bounds[2, 1]
+    #     )
+    #     reach_theta_left = reach_bounds[2, 0]
+    #     reach_theta_right = reach_bounds[2, 1]
+        
+    #     #        ##added for debugging
+    #     # Log if fix_angle_interval changed anything
+    #     if not np.isclose(original_left, cand_theta_left) or \
+    #         not np.isclose(original_right, cand_theta_right):
+    #         print(f"fix_angle_interval changed [{original_left:.3f}, {original_right:.3f}] "
+    #           f"→ [{cand_theta_left:.3f}, {cand_theta_right:.3f}]")
+    #     #        ##added for debugging
     
-    def compute_successor_cells(self, cell, action, cell_tree) -> List[Cell]:
-        """
-        Find all cells that intersect the reachable set at ANY checkpoint.
         
-        Process:
-        1. Roll out dynamics from cell center for tau duration with dt intervals
-        2. At each checkpoint, compute Grönwall circle/bounds
-        3. Query cells intersecting those bounds
-        4. Union all successor sets (avoiding duplicates)
-        """
-        center = cell.center
+    #     return self.intervals_intersect(
+    #         cand_theta_left, cand_theta_right,
+    #         reach_theta_left, reach_theta_right
+    #     )
+    
+    # def compute_successor_cells(self, cell, action, cell_tree) -> List[Cell]:
+    #     """
+    #     Find all cells that intersect the reachable set at ANY checkpoint.
         
-        # Compute cell radius
-        if self.use_infinity_norm:
-            r = 0.5 * cell.get_max_range()
-        else:
-            ranges = np.array([cell.get_range(j) for j in range(len(cell.bounds))])
-            r = 0.5 * np.linalg.norm(ranges)
+    #     Process:
+    #     1. Roll out dynamics from cell center for tau duration with dt intervals
+    #     2. At each checkpoint, compute Grönwall circle/bounds
+    #     3. Query cells intersecting those bounds
+    #     4. Union all successor sets (avoiding duplicates)
+    #     """
+    #     center = cell.center
         
-        # Roll out dynamics to get states at each checkpoint
-        checkpoint_states = self.env.dynamics_multi_step(center, action, self.tau, self.dt)
+    #     # Compute cell radius
+    #     if self.use_infinity_norm:
+    #         r = 0.5 * cell.get_max_range()
+    #     else:
+    #         ranges = np.array([cell.get_range(j) for j in range(len(cell.bounds))])
+    #         r = 0.5 * np.linalg.norm(ranges)
         
-        # Use set to track unique successor cell IDs (automatic deduplication)
-        successor_cell_ids = set()
+    #     # Roll out dynamics to get states at each checkpoint
+    #     checkpoint_states = self.env.dynamics_multi_step(center, action, self.tau, self.dt)
         
-        # For each checkpoint: compute reachable bounds and query successors
-        for i, state_at_checkpoint in enumerate(checkpoint_states):
-            # Grönwall expansion at this checkpoint time
-            growth_factor_i = self.growth_factors[i]
-            expansion_i = r * growth_factor_i
+    #     # Use set to track unique successor cell IDs (automatic deduplication)
+    #     successor_cell_ids = set()
+        
+    #     # For each checkpoint: compute reachable bounds and query successors
+    #     for i, state_at_checkpoint in enumerate(checkpoint_states):
+    #         # Grönwall expansion at this checkpoint time
+    #         growth_factor_i = self.growth_factors[i]
+    #         expansion_i = r * growth_factor_i
             
-            # Compute reachable bounds (Grönwall circle) at this checkpoint
-            reach_bounds = np.zeros((self.env.get_state_dim(), 2))
+    #         # Compute reachable bounds (Grönwall circle) at this checkpoint
+    #         reach_bounds = np.zeros((self.env.get_state_dim(), 2))
             
-            # x bounds
-            reach_bounds[0, 0] = state_at_checkpoint[0] - expansion_i
-            reach_bounds[0, 1] = state_at_checkpoint[0] + expansion_i
+    #         # x bounds
+    #         reach_bounds[0, 0] = state_at_checkpoint[0] - expansion_i
+    #         reach_bounds[0, 1] = state_at_checkpoint[0] + expansion_i
             
-            # y bounds
-            reach_bounds[1, 0] = state_at_checkpoint[1] - expansion_i
-            reach_bounds[1, 1] = state_at_checkpoint[1] + expansion_i
+    #         # y bounds
+    #         reach_bounds[1, 0] = state_at_checkpoint[1] - expansion_i
+    #         reach_bounds[1, 1] = state_at_checkpoint[1] + expansion_i
             
-            # θ bounds (with normalization)
-            theta_lower = state_at_checkpoint[2] - expansion_i
-            theta_upper = state_at_checkpoint[2] + expansion_i
-            theta_lower, theta_upper = self.fix_angle_interval(theta_lower, theta_upper)
-            reach_bounds[2, 0] = theta_lower
-            reach_bounds[2, 1] = theta_upper
+    #         # θ bounds (with normalization)
+    #         theta_lower = state_at_checkpoint[2] - expansion_i
+    #         theta_upper = state_at_checkpoint[2] + expansion_i
+    #         # theta_lower, theta_upper = self.fix_angle_interval(theta_lower, theta_upper)
+    #         reach_bounds[2, 0] = theta_lower
+    #         reach_bounds[2, 1] = theta_upper
             
-            # Query spatial index for cells intersecting this checkpoint's bounds
-            candidates = cell_tree.get_intersecting_cells(reach_bounds)
+    #         # Query spatial index for cells intersecting this checkpoint's bounds
+    #         candidates = cell_tree.get_intersecting_cells(reach_bounds)
             
-            # Filter by theta intersection and add to successor set
-            for candidate in candidates:
-                if self._check_theta_intersection(candidate, reach_bounds):
-                    successor_cell_ids.add(candidate.cell_id)
+    #         # Filter by theta intersection and add to successor set
+    #         for candidate in candidates:
+    #             # if self._check_theta_intersection(candidate, reach_bounds):
+    #             successor_cell_ids.add(candidate.cell_id)
         
-        # Convert cell IDs back to Cell objects
-        cell_id_to_cell = {c.cell_id: c for c in cell_tree.get_leaves()}
-        successors = [cell_id_to_cell[cid] for cid in successor_cell_ids 
-                     if cid in cell_id_to_cell]
+    #     # Convert cell IDs back to Cell objects
+    #     cell_id_to_cell = {c.cell_id: c for c in cell_tree.get_leaves()}
+    #     successors = [cell_id_to_cell[cid] for cid in successor_cell_ids 
+    #                  if cid in cell_id_to_cell]
         
-        return successors
+    #     return successors
     
     def print_debug_summary(self):
         """Print debug verification summary."""
@@ -614,38 +738,39 @@ def _bellman_update_optimized(task, shared_data):
     Optimized worker: uses numpy arrays instead of serialized objects.
     """
     cell_idx, succ_indices_by_action = task
-    V_upper_arr, V_lower_arr, l_upper_arr, l_lower_arr, gamma = shared_data
+    V_upper_arr, V_lower_arr, l_upper_arr, l_lower_arr, r_upper_arr, r_lower_arr, gamma = shared_data  ##changed for RA case - added r arrays
     
     l_upper = l_upper_arr[cell_idx]
     l_lower = l_lower_arr[cell_idx]
+    r_upper = r_upper_arr[cell_idx]  ##changed for RA case
+    r_lower = r_lower_arr[cell_idx]  ##changed for RA case
     
     # Skip Bellman backup if this cell has no successors for any action
-    if all(len(succ) == 0 for succ in succ_indices_by_action):
-        return (cell_idx, V_upper_arr[cell_idx], V_lower_arr[cell_idx])
-    
+    #I COMMENTED THIS BECAUSE IF SUCC SET EMPTY, IT WAS NOT DOING THE BELLMAN OPERATOR AND JUST SKIPPING
+    # if all(len(succ) == 0 for succ in succ_indices_by_action):
+    #     return (cell_idx, V_upper_arr[cell_idx], V_lower_arr[cell_idx])
+
+        
     best_min_val = -np.inf
     best_max_val = -np.inf
-    
+
     for succ_indices in succ_indices_by_action:
         if len(succ_indices) == 0:
-            continue
-        
-        # Direct numpy array indexing - VERY FAST
-        upper_vals = V_upper_arr[succ_indices]
-        lower_vals = V_lower_arr[succ_indices]
-        
-        action_lower = gamma * np.min(lower_vals)
-        action_upper = gamma * np.max(upper_vals)
-        
-        if action_lower > best_min_val:
-            best_min_val = action_lower
+            action_lower = -np.inf
+            action_upper = -np.inf
+        else:
+            lower_vals = V_lower_arr[succ_indices]
+            upper_vals = V_upper_arr[succ_indices]
 
-        if action_upper > best_max_val:  #  Independent update. check if this was causing noncontraction in Vupper
-            best_max_val = action_upper
-    
-    new_V_lower = min(l_lower, best_min_val) if best_min_val > -np.inf else l_lower
-    new_V_upper = min(l_upper, best_max_val) if best_max_val > -np.inf else l_upper
-    
+            action_lower = gamma * np.min(lower_vals)
+            action_upper = gamma * np.max(upper_vals)
+
+        best_min_val = max(best_min_val, action_lower)
+        best_max_val = max(best_max_val, action_upper)
+
+    new_V_lower = min(l_lower, max(r_lower, best_min_val))
+    new_V_upper = min(l_upper, max(r_upper, best_max_val))
+
     return (cell_idx, new_V_upper, new_V_lower)
 
 
@@ -653,10 +778,13 @@ def _initialize_cell_worker(args):
     """
     Worker for parallel cell initialization.
     """
-    cell_id, bounds, center, env, L_l = args
+    cell_id, bounds, center, env, L_l, L_r = args  ##changed for RA case - added L_r
     
     # Compute failure function at center
     l_center = env.failure_function(center)
+    
+    # Compute reward function at center  ##changed for RA case
+    r_center = env.reward_function(center)  ##changed for RA case
     
     # Compute radius
     ranges = bounds[:, 1] - bounds[:, 0]
@@ -665,34 +793,11 @@ def _initialize_cell_worker(args):
     l_lower = l_center - L_l * r
     l_upper = l_center + L_l * r
     
-    return (cell_id, l_lower, l_upper)
-def _fix_angle_interval_standalone(left: float, right: float):
-    """Standalone version of fix_angle_interval for worker processes."""
-    while right < left:
-        right += 2 * np.pi
+    r_lower = r_center - L_r * r  ##changed for RA case
+    r_upper = r_center + L_r * r  ##changed for RA case
     
-    if right - left >= 2 * np.pi - 0.01:
-        return -np.pi, np.pi
-    
-    while left < -np.pi or right < -np.pi:
-        left += 2 * np.pi
-        right += 2 * np.pi
-    
-    while left > 3 * np.pi or right > 3 * np.pi:
-        left -= 2 * np.pi
-        right -= 2 * np.pi
-    
-    while left > np.pi and right > np.pi:
-        left -= 2 * np.pi
-        right -= 2 * np.pi
-    
-    return left, right
+    return (cell_id, l_lower, l_upper, r_lower, r_upper)  ##changed for RA case
 
-
-def _intervals_intersect_standalone(a_left: float, a_right: float, 
-                                    b_left: float, b_right: float) -> bool:
-    """Standalone version of intervals_intersect for worker processes."""
-    return not (a_right < b_left or b_right < a_left)
 
 def _compute_checkpoint_worker(task):
     """
@@ -703,81 +808,6 @@ def _compute_checkpoint_worker(task):
     checkpoint_states = env.dynamics_multi_step(center, action, tau, dt)
     return (cell_id, action, checkpoint_states)
 
-def _precompute_successor_worker(task):
-    """
-    Worker function for parallel successor precomputation.
-    
-    Args:
-        task: Tuple of (cell_data, action, env, reachability_params, all_leaves_data)
-    
-    Returns:
-        Tuple of ((cell_id, action), list_of_successor_cell_ids)
-    """
-    cell_data, action, env, reachability_params, all_leaves_data = task
-    cell_id, bounds, center = cell_data
-    
-    # Unpack reachability parameters
-    tau, dt, growth_factors, use_infinity_norm = reachability_params
-    
-    # Compute cell radius
-    if use_infinity_norm:
-        ranges = bounds[:, 1] - bounds[:, 0]
-        r = 0.5 * np.max(ranges)
-    else:
-        ranges = bounds[:, 1] - bounds[:, 0]
-        r = 0.5 * np.linalg.norm(ranges)
-    
-    # Roll out dynamics to get checkpoint states
-    checkpoint_states = env.dynamics_multi_step(center, action, tau, dt)
-    
-    # Track unique successor cell IDs
-    successor_cell_ids = set()
-    
-    # For each checkpoint: compute reachable bounds and find successors
-    for i, state_at_checkpoint in enumerate(checkpoint_states):
-        growth_factor_i = growth_factors[i]
-        expansion_i = r * growth_factor_i
-        
-        # Compute reachable bounds at this checkpoint
-        reach_bounds = np.zeros((env.get_state_dim(), 2))
-        reach_bounds[0, 0] = state_at_checkpoint[0] - expansion_i
-        reach_bounds[0, 1] = state_at_checkpoint[0] + expansion_i
-        reach_bounds[1, 0] = state_at_checkpoint[1] - expansion_i
-        reach_bounds[1, 1] = state_at_checkpoint[1] + expansion_i
-        
-        # Handle theta dimension (for 3D state space)
-        if env.get_state_dim() == 3:
-            theta_lower = state_at_checkpoint[2] - expansion_i
-            theta_upper = state_at_checkpoint[2] + expansion_i
-            theta_lower, theta_upper = _fix_angle_interval_standalone(theta_lower, theta_upper)
-            reach_bounds[2, 0] = theta_lower
-            reach_bounds[2, 1] = theta_upper
-        
-        # Check all leaves for intersection
-        for candidate_id, candidate_bounds in all_leaves_data:
-            # Check x and y intersection
-            if (reach_bounds[0, 1] >= candidate_bounds[0, 0] and 
-                reach_bounds[0, 0] <= candidate_bounds[0, 1] and
-                reach_bounds[1, 1] >= candidate_bounds[1, 0] and 
-                reach_bounds[1, 0] <= candidate_bounds[1, 1]):
-                
-                # Check theta intersection if 3D
-                if env.get_state_dim() == 3:
-                    cand_theta_left, cand_theta_right = _fix_angle_interval_standalone(
-                        candidate_bounds[2, 0], candidate_bounds[2, 1]
-                    )
-                    reach_theta_left = reach_bounds[2, 0]
-                    reach_theta_right = reach_bounds[2, 1]
-                    
-                    if _intervals_intersect_standalone(cand_theta_left, cand_theta_right,
-                                                       reach_theta_left, reach_theta_right):
-                        successor_cell_ids.add(candidate_id)
-                else:
-                    successor_cell_ids.add(candidate_id)
-    
-    return ((cell_id, action), list(successor_cell_ids))
-
-
 # ============================================================================
 # PART 5: OPTIMIZED VALUE ITERATION (ALGORITHMS 1 & 3)
 # ============================================================================
@@ -787,21 +817,36 @@ class SafetyValueIterator:
     
     def __init__(self, env: Environment, gamma: float, cell_tree: CellTree,
                  reachability: GronwallReachabilityAnalyzer, output_dir: Optional[str] = None,
-                 n_workers: Optional[int] = None, precompute_successors: bool = False):
+                 n_workers: Optional[int] = None, precompute_successors: bool = False,args=None):
         self.env = env
         self.gamma = gamma
         self.cell_tree = cell_tree
         self.reachability = reachability
-        
+        self.args=args
         if output_dir is None:
             rname = type(reachability).__name__
-            output_dir = f"./results/{rname}"
+            param_suffix = (
+                f"dynamics_{args.dynamics}_"
+                f"gamma_{args.gamma:.3f}_"
+                f"dt_{env.dt:.3f}_"
+                f"tau_{env.tau:.3f}_"
+                f"tol_{args.tolerance:.1e}_"
+                f"eps_{args.epsilon:.3f}"
+                f"vi-iterations_{args.vi_iterations}"
+                f"conservative_{args.conservative}"
+                f"delta-max_{args.delta_max}"
+                f"init_resol_{args.initial_resolution}"
+            )
+            output_dir = os.path.join(
+                "./results_RA/fixed_bellmannew/machineeps",
+                f"{rname}_{param_suffix}"
+            )
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
         
-        self.L_f, self.L_l = env.get_lipschitz_constants()
-        if gamma * self.L_f >= 1:
-            raise ValueError(f"Contraction condition violated: γL_f = {gamma * self.L_f} >= 1")
+        self.L_f, self.L_l, self.L_r = env.get_lipschitz_constants()  ##changed for RA case
+        # if gamma * self.L_f >= 1:
+        #     raise ValueError(f"Contraction condition violated: γL_f = {gamma * self.L_f} >= 1")
         
         self.refinement_phase = 0
         
@@ -811,7 +856,8 @@ class SafetyValueIterator:
         self.successor_cache = {}
         self.pool = None
         
-        print(f"Initialized with γ={gamma}, L_f={self.L_f}, L_l={self.L_l}")
+        print(f"Initialized with γ={gamma}, L_f={self.L_f}, L_l={self.L_l},  L_r={self.L_r}")
+
         print(f"Contraction factor: γL_f = {gamma * self.L_f:.4f}")
         print(f"Using {self.n_workers} parallel workers")
         
@@ -897,7 +943,7 @@ class SafetyValueIterator:
                 if self.env.get_state_dim() == 3:
                     theta_lower = state_at_checkpoint[2] - expansion_i
                     theta_upper = state_at_checkpoint[2] + expansion_i
-                    theta_lower, theta_upper = self.reachability.fix_angle_interval(theta_lower, theta_upper)
+                    # theta_lower, theta_upper = self.reachability.fix_angle_interval(theta_lower, theta_upper)
                     reach_bounds[2, 0] = theta_lower
                     reach_bounds[2, 1] = theta_upper
                 
@@ -906,19 +952,74 @@ class SafetyValueIterator:
                 
                 # Filter by theta intersection
                 for candidate in candidates:
-                    if self.reachability._check_theta_intersection(candidate, reach_bounds):
-                        successor_cell_ids.add(candidate.cell_id)
+                    # if self.reachability._check_theta_intersection(candidate, reach_bounds):
+                    successor_cell_ids.add(candidate.cell_id)
+
             
             # Store in cache
             key = (cell_id, action)
             self.successor_cache[key] = list(successor_cell_ids)
-        
+     
         query_time = time.time() - query_start
         elapsed = time.time() - start_time
         
         print(f"  ✓ Spatial queries completed in {query_time:.2f}s")
         print(f"  ✓ Total precomputation: {elapsed:.2f}s ({n_tasks/elapsed:.1f} tasks/s)")
         print(f"    Breakdown: {ode_time/elapsed*100:.1f}% ODE, {query_time/elapsed*100:.1f}% queries")
+  
+        print(f"\n{'='*70}")
+        print("DETAILED CHECK: Cell 0, Action 0.0")
+        print(f"{'='*70}")
+
+        cell_0 = next(c for c in leaves if c.cell_id == 0)
+        print(f"Cell 0 center: {cell_0.center}")
+        print(f"Cell 0 bounds: {cell_0.bounds}")
+        print(f"Cell 0 radius: {0.5 * cell_0.get_max_range()}")
+
+        action = 0.0
+        checkpoint_states = self.env.dynamics_multi_step(cell_0.center, action, self.reachability.tau, self.reachability.dt)
+
+        print(f"\nCheckpoint states (showing every 2nd):")
+        for i in range(0, len(checkpoint_states), 2):
+            t = self.reachability.checkpoint_times[i]
+            state = checkpoint_states[i]
+            print(f"  t={t:.1f}: state = {state}")
+
+        print(f"\nFinal checkpoint analysis:")
+        final_state = checkpoint_states[-1]
+        r = 0.5 * cell_0.get_max_range()
+        expansion = r * self.reachability.growth_factors[-1]
+        print(f"  Final state: {final_state}")
+        print(f"  Expansion: {expansion:.3f}")
+
+        reach_bounds = np.zeros((3, 2))
+        reach_bounds[0, 0] = final_state[0] - expansion
+        reach_bounds[0, 1] = final_state[0] + expansion
+        reach_bounds[1, 0] = final_state[1] - expansion
+        reach_bounds[1, 1] = final_state[1] + expansion
+
+        theta_lower = final_state[2] - expansion
+        theta_upper = final_state[2] + expansion
+        # theta_lower, theta_upper = self.reachability.fix_angle_interval(theta_lower, theta_upper)
+        reach_bounds[2, 0] = theta_lower
+        reach_bounds[2, 1] = theta_upper
+
+        print(f"  Reachable bounds:")
+        print(f"    x ∈ [{reach_bounds[0,0]:.3f}, {reach_bounds[0,1]:.3f}]")
+        print(f"    y ∈ [{reach_bounds[1,0]:.3f}, {reach_bounds[1,1]:.3f}]")
+        print(f"    θ ∈ [{reach_bounds[2,0]:.3f}, {reach_bounds[2,1]:.3f}]")
+
+        print(f"  Original cell bounds:")
+        print(f"    x ∈ [{cell_0.bounds[0,0]:.3f}, {cell_0.bounds[0,1]:.3f}]")
+        print(f"    y ∈ [{cell_0.bounds[1,0]:.3f}, {cell_0.bounds[1,1]:.3f}]")
+        print(f"    θ ∈ [{cell_0.bounds[2,0]:.3f}, {cell_0.bounds[2,1]:.3f}]")
+
+        # Check spatial index query
+        candidates = self.cell_tree.get_intersecting_cells(reach_bounds)
+        print(f"  Spatial index returned {len(candidates)} candidates")
+        print(f"  Cell 0 in candidates? {cell_0.cell_id in [c.cell_id for c in candidates]}")
+    
+        
     def initialize_cells(self):
         """Initialize stage cost bounds for all cells (parallelized)."""
         leaves = self.cell_tree.get_leaves()
@@ -931,7 +1032,7 @@ class SafetyValueIterator:
         
         # Prepare tasks
         tasks = [
-            (cell.cell_id, cell.bounds.copy(), cell.center.copy(), self.env, self.L_l)
+            (cell.cell_id, cell.bounds.copy(), cell.center.copy(), self.env, self.L_l, self.L_r)  ##changed for RA case
             for cell in leaves
         ]
         
@@ -944,13 +1045,15 @@ class SafetyValueIterator:
         
         # Apply results
         cell_dict = {cell.cell_id: cell for cell in leaves}
-        for cell_id, l_lower, l_upper in results:
+        for cell_id, l_lower, l_upper, r_lower, r_upper in results:  ##changed for RA case
             cell = cell_dict[cell_id]
             cell.l_lower = l_lower
             cell.l_upper = l_upper
-            cell.V_lower = cell.l_lower #check if make this inf instead 
-            cell.V_upper = cell.l_upper #check if make this inf instead 
-        
+            cell.r_lower = r_lower  ##changed for RA case
+            cell.r_upper = r_upper  ##changed for RA case
+            cell.V_lower = cell.l_lower
+            cell.V_upper = cell.l_upper
+            
         elapsed = time.time() - start_time
         print(f"  ✓ Initialized in {elapsed:.2f}s ({len(leaves)/elapsed:.1f} cells/s)")
     
@@ -964,10 +1067,10 @@ class SafetyValueIterator:
         
         # Prepare tasks
         tasks = [
-            (cell.cell_id, cell.bounds.copy(), cell.center.copy(), self.env, self.L_l)
+            (cell.cell_id, cell.bounds.copy(), cell.center.copy(), self.env, self.L_l, self.L_r)  ##changed for RA case
             for cell in new_cells
         ]
-        
+            
         # Use persistent pool if available, otherwise create temporary one
         if self.pool is not None:
             results = self.pool.map(_initialize_cell_worker, tasks)
@@ -977,10 +1080,12 @@ class SafetyValueIterator:
         
         # Apply results
         cell_dict = {cell.cell_id: cell for cell in new_cells}
-        for cell_id, l_lower, l_upper in results:
+        for cell_id, l_lower, l_upper, r_lower, r_upper in results:  ##changed for RA case
             cell = cell_dict[cell_id]
             cell.l_lower = l_lower
             cell.l_upper = l_upper
+            cell.r_lower = r_lower  ##changed for RA case
+            cell.r_upper = r_upper  ##changed for RA case
             cell.V_lower = cell.l_lower
             cell.V_upper = cell.l_upper
         
@@ -1017,7 +1122,51 @@ class SafetyValueIterator:
             leaves = self.cell_tree.get_leaves()
             prev_upper = {cell.cell_id: cell.V_upper for cell in leaves}
             prev_lower = {cell.cell_id: cell.V_lower for cell in leaves}
-            
+                        # ============ ADDED: Detailed debugging output for Phase 0 ============
+            if self.refinement_phase == 0 and plot_freq > 0 and iteration % plot_freq == 0:
+                print(f"\n{'='*100}")
+                print(f"DETAILED CELL STATE - Iteration {iteration}")
+                print(f"{'='*100}")
+                
+                for cell in leaves[0:1]:
+                    print(f"\n--- Cell {cell.cell_id} ---")
+                    print(f"  Bounds: x=[{cell.bounds[0,0]:.6f}, {cell.bounds[0,1]:.6f}], "
+                        f"y=[{cell.bounds[1,0]:.6f}, {cell.bounds[1,1]:.6f}], "
+                        f"θ=[{cell.bounds[2,0]:.6f}, {cell.bounds[2,1]:.6f}]")
+                    print(f"  Center: {cell.center}")
+                    print(f"  l_lower: {cell.l_lower:.10f}")
+                    print(f"  l_upper: {cell.l_upper:.10f}")
+                    print(f"  V_lower: {cell.V_lower:.10f}")
+                    print(f"  V_upper: {cell.V_upper:.10f}")
+                    
+                    # Show successors for each action
+                    actions = self.env.get_action_space()
+                    for action in actions:
+                        cache_key = (cell.cell_id, action)
+                        if cache_key in self.successor_cache:
+                            succ_ids = self.successor_cache[cache_key]
+                            print(f"\n  Action {action:+.3f} → {len(succ_ids)} successors:")
+                            
+                            if len(succ_ids) == 0:
+                                print(f"    (No successors)")
+                            else:
+                                # Get successor cells
+                                cell_id_to_cell = {c.cell_id: c for c in leaves}
+                                for succ_id in succ_ids:
+                                    if succ_id in cell_id_to_cell:
+                                        succ = cell_id_to_cell[succ_id]
+                                        print(f"    → Cell {succ.cell_id}:")
+                                        print(f"       Bounds: x=[{succ.bounds[0,0]:.6f}, {succ.bounds[0,1]:.6f}], "
+                                            f"y=[{succ.bounds[1,0]:.6f}, {succ.bounds[1,1]:.6f}], "
+                                            f"θ=[{succ.bounds[2,0]:.6f}, {succ.bounds[2,1]:.6f}]")
+                                        print(f"       l_lower: {succ.l_lower:.10f}, l_upper: {succ.l_upper:.10f}")
+                                        print(f"       V_lower: {succ.V_lower:.10f}, V_upper: {succ.V_upper:.10f}")
+                        else:
+                            print(f"\n  Action {action:+.3f} → (No cache entry)")
+                
+                print(f"\n{'='*100}\n")
+            # ============ END ADDED SECTION ============
+                
             # Build compact numpy arrays for efficient parallel processing
             n_cells = len(leaves)
             cell_ids = np.array([c.cell_id for c in leaves])
@@ -1025,6 +1174,8 @@ class SafetyValueIterator:
             V_lower_arr = np.array([c.V_lower for c in leaves])
             l_upper_arr = np.array([c.l_upper for c in leaves])
             l_lower_arr = np.array([c.l_lower for c in leaves])
+            r_upper_arr = np.array([c.r_upper for c in leaves])  ##changed for RA case
+            r_lower_arr = np.array([c.r_lower for c in leaves])  ##changed for RA case
             
             # Build id->index mapping
             id_to_idx = {cid: idx for idx, cid in enumerate(cell_ids)}
@@ -1043,8 +1194,8 @@ class SafetyValueIterator:
                     succ_indices_by_action.append(succ_indices)
                 tasks.append((idx, succ_indices_by_action))
             
-            # Shared data for workers
-            shared_data = (V_upper_arr, V_lower_arr, l_upper_arr, l_lower_arr, self.gamma)
+                # Shared data for workers
+                shared_data = (V_upper_arr, V_lower_arr, l_upper_arr, l_lower_arr, r_upper_arr, r_lower_arr, self.gamma)  ##changed for RA case
             
             # Parallel Bellman updates
             worker_func = partial(_bellman_update_optimized, shared_data=shared_data)
@@ -1081,34 +1232,38 @@ class SafetyValueIterator:
                     print(f"  δ^k = {delta_k:.10e} ≥ -δ_max = -{delta_max:.10e}")
                     print(f"  ||V̄^k - V̄^k-1||_∞ = {diff_upper:.10e} < {convergence_tol}")
                     
-                    # MODIFIED: Apply conservative correction using min(|delta_k|, delta_max)
-                    # If delta_k is negative but small, use |delta_k| instead of delta_max for less conservative correction
-                    delta_to_use = min(abs(delta_k), delta_max)# if delta_k < 0 else delta_max
+                    delta_to_use = abs(delta_k)
                     epsilon_cons = (self.gamma * delta_to_use) / (1 - self.gamma)
                     
-                    print(f"  Using δ_actual = {delta_to_use:.10e} (min of |δ^k|={abs(delta_k):.10e}, δ_max={delta_max:.10e})")
-                    print(f"  Applying conservative margin: ε_cons = (γ * δ_actual) / (1 - γ)")
                     print(f"  ε_cons = ({self.gamma} * {delta_to_use:.10e}) / {1 - self.gamma} = {epsilon_cons:.10e}")
-                    print(f"  Correcting V_lower for {len(leaves)} cells: V_lower ← V_lower - ε_cons")
+                    print(f"  Correcting V_lower for {len(leaves)} cells: V_lower ← V_lower - ε_cons - ε_machine")
+                    
+                    # NEW: Track statistics
+                    eps_machine = np.finfo(float).eps
+                    cells_near_zero = 0
+                    cells_flipped_sign = 0
                     
                     for cell in leaves:
-                        cell.V_lower = cell.V_lower - epsilon_cons
+                        old_value = cell.V_lower
+                        
+                        # Apply conservative correction
+                        cell.V_lower = cell.V_lower - epsilon_cons - eps_machine
+                        
+                        # Track cells affected by cancellation
+                        if abs(old_value - epsilon_cons) <  eps_machine:
+                            cells_near_zero += 1
+                        
+                        # Track sign flips due to eps_machine subtraction
+                        if old_value - epsilon_cons > 0 and cell.V_lower <= 0:
+                            cells_flipped_sign += 1
                     
                     print(f"  ✓ Conservative correction applied successfully")
+                    print(f"  Machine epsilon ε_machine = {eps_machine:.3e}")
                     
-                    # Save final plot
-                    suffix = "_final"
-                    if self.refinement_phase > 0:
-                        filename = os.path.join(
-                            self.output_dir, 
-                            f"iteration_{iteration + 1:04d}_refinement_{self.refinement_phase:02d}{suffix}.png"
-                        )
-                    else:
-                        filename = os.path.join(
-                            self.output_dir, 
-                            f"iteration_{iteration + 1:04d}{suffix}.png"
-                        )
-                    plot_value_function(self.env, self.cell_tree, filename, iteration + 1)
+                    if cells_near_zero > 0:
+                        print(f"  ⚠️  {cells_near_zero} cells experienced near-cancellation")
+                    if cells_flipped_sign > 0:
+                        print(f"  ⚠️  {cells_flipped_sign} cells changed from (+) to (≤0) due to ε_machine")
                     break
             else:
                 # ALGORITHM 1: Standard convergence
@@ -1136,13 +1291,13 @@ class SafetyValueIterator:
                             self.output_dir, 
                             f"iteration_{iteration + 1:04d}{suffix}.png"
                         )
-                    plot_value_function(self.env, self.cell_tree, filename, iteration + 1)
+                    # plot_value_function(self.env, self.cell_tree, filename, iteration + 1)
                     break
             
             # Periodic plotting
-            if plot_freq > 0 and (iteration + 1) % plot_freq == 0:
+            if plot_freq > 0 and (iteration) % plot_freq == 0:
                 suffix = ""
-                if self.refinement_phase > 0:
+                if self.refinement_phase >= 0:
                     filename = os.path.join(
                         self.output_dir, 
                         f"iteration_{iteration + 1:04d}_refinement_{self.refinement_phase:02d}{suffix}.png"
@@ -1169,7 +1324,7 @@ class SafetyValueIterator:
             # Apply conservative correction even if max iterations reached
             if conservative_mode:
                 # MODIFIED: Use min(|delta_k|, delta_max) when max iterations reached
-                delta_to_use = min(abs(delta_k), delta_max) #if delta_k < 0 else delta_max
+                delta_to_use = abs(delta_k)#delta_to_use = min(abs(delta_k), delta_max) #if delta_k < 0 else delta_max
                 epsilon_cons = (self.gamma * delta_to_use) / (1 - self.gamma)
                 
                 print(f"  Using δ_actual = {delta_to_use:.10e} for correction")
@@ -1187,6 +1342,23 @@ class SafetyValueIterator:
         LOCAL value iteration: update ALL leaves after refinement.
         """
         leaves = self.cell_tree.get_leaves()
+        
+        # ============ ADDED SECTION START ============
+        # CRITICAL: Reinitialize ALL cells to l_lower/l_upper (required by Lemma 1)
+        print(f"  Reinitializing ALL {len(leaves)} cells to l_lower/l_upper (Lemma 1 requirement)")
+        reinit_start = time.time()
+
+        # Use existing parallel initialization
+        self.initialize_cells()  # This REINITIALIZE V to stage cost (Lemma 1 requirement)
+
+        reinit_time = time.time() - reinit_start
+        print(f"  ✓ Reinitialized {len(leaves)} cells in {reinit_time:.2f}s ({len(leaves)/reinit_time:.1f} cells/s)")
+        # ============ ADDED SECTION END ============
+            
+            
+        
+        
+        
         
         print(f"  Local VI: updating all {len(leaves)} cells")
         print(f"    Conservative mode: {conservative_mode}")
@@ -1216,6 +1388,8 @@ class SafetyValueIterator:
             prev_upper = {cell.cell_id: cell.V_upper for cell in leaves}
             prev_lower = {cell.cell_id: cell.V_lower for cell in leaves}
             
+            
+            
             # Build numpy arrays for ALL leaves
             n_cells = len(leaves)
             cell_ids = np.array([c.cell_id for c in leaves])
@@ -1223,6 +1397,8 @@ class SafetyValueIterator:
             V_lower_arr = np.array([c.V_lower for c in leaves])
             l_upper_arr = np.array([c.l_upper for c in leaves])
             l_lower_arr = np.array([c.l_lower for c in leaves])
+            r_upper_arr = np.array([c.r_upper for c in leaves])  ##changed for RA case
+            r_lower_arr = np.array([c.r_lower for c in leaves])  ##changed for RA case
             
             id_to_idx = {cid: idx for idx, cid in enumerate(cell_ids)}
             
@@ -1240,7 +1416,7 @@ class SafetyValueIterator:
                     succ_indices_by_action.append(succ_indices)
                 tasks.append((idx, succ_indices_by_action))
             
-            shared_data = (V_upper_arr, V_lower_arr, l_upper_arr, l_lower_arr, self.gamma)
+            shared_data = (V_upper_arr, V_lower_arr, l_upper_arr, l_lower_arr, r_upper_arr, r_lower_arr, self.gamma)  ##changed for RA case
             
             worker_func = partial(_bellman_update_optimized, shared_data=shared_data)
             results = self.pool.map(worker_func, tasks)
@@ -1264,30 +1440,50 @@ class SafetyValueIterator:
                 
                 # Local VI convergence metrics
                 print(f"    Local Iteration {iteration + 1:2d}: "
-                    f"||V̄^k - V̄^k-1||_∞ = {diff_upper:10.20f}, "
-                    f"||V_^k - V_^k-1||_∞ = {diff_lower:10.20f}, "
+                    f"||V̄^k - V̄^k-1||_∞ = {diff_upper:10.30f}, "
+                    f"||V_^k - V_^k-1||_∞ = {diff_lower:10.30f}, "
                     f"δ^k = {delta_k:12.20f}")
                 
                 # MODIFIED: Check both V_upper convergence AND conservative condition for V_lower
                 if delta_k >= -delta_max and diff_upper < convergence_tol:
-                    print(f"    " + "="*40)
-                    print(f"    ✓ CONSERVATIVE STOPPING (Local VI)")
-                    print(f"    " + "="*40)
-                    print(f"      δ^k = {delta_k:.20e} ≥ -δ_max = -{delta_max:.20e}")
-                    print(f"      ||V̄^k - V̄^k-1||_∞ = {diff_upper:.20e} < {convergence_tol}")
+                    print(f"\n" + "="*60)
+                    print("✓ CONSERVATIVE STOPPING CONDITION MET (Algorithm 3)")
+                    print("="*60)
+                    print(f"  δ^k = {delta_k:.10e} ≥ -δ_max = -{delta_max:.10e}")
+                    print(f"  ||V̄^k - V̄^k-1||_∞ = {diff_upper:.10e} < {convergence_tol}")
                     
-                    # MODIFIED: Use min(|delta_k|, delta_max) for less conservative correction
-                    # If delta_k is negative but small, use |delta_k| instead of delta_max
-                    delta_to_use = min(abs(delta_k), delta_max) #if delta_k < 0 else delta_max
+                    delta_to_use = abs(delta_k)
                     epsilon_cons = (self.gamma * delta_to_use) / (1 - self.gamma)
                     
-                    print(f"      Using δ_actual = {delta_to_use:.20e} (min of |δ^k|={abs(delta_k):.20e}, δ_max={delta_max:.20e})")
-                    print(f"      Applying conservative margin: ε_cons = {epsilon_cons:.20e}")
-                    print(f"      Correcting V_lower for {len(leaves)} cells")
+                    print(f"  ε_cons = ({self.gamma} * {delta_to_use:.10e}) / {1 - self.gamma} = {epsilon_cons:.10e}")
+                    print(f"  Correcting V_lower for {len(leaves)} cells: V_lower ← V_lower - ε_cons - ε_machine")
+                    
+                    # NEW: Track statistics
+                    eps_machine = np.finfo(float).eps
+                    cells_near_zero = 0
+                    cells_flipped_sign = 0
                     
                     for cell in leaves:
-                        cell.V_lower = cell.V_lower - epsilon_cons
-                    print(f"      ✓ Conservative correction applied")
+                        old_value = cell.V_lower
+                        
+                        # Apply conservative correction
+                        cell.V_lower = cell.V_lower - epsilon_cons - eps_machine
+                        
+                        # Track cells affected by cancellation
+                        if abs(old_value - epsilon_cons) < 100 * eps_machine:
+                            cells_near_zero += 1
+                        
+                        # Track sign flips due to eps_machine subtraction
+                        if old_value - epsilon_cons > 0 and cell.V_lower <= 0:
+                            cells_flipped_sign += 1
+                    
+                    print(f"  ✓ Conservative correction applied successfully")
+                    print(f"  Machine epsilon ε_machine = {eps_machine:.3e}")
+                    
+                    if cells_near_zero > 0:
+                        print(f"  ⚠️  {cells_near_zero} cells experienced near-cancellation")
+                    if cells_flipped_sign > 0:
+                        print(f"  ⚠️  {cells_flipped_sign} cells changed from (+) to (≤0) due to ε_machine")
                     break
             else:
                 # Standard local convergence metrics
@@ -1303,7 +1499,88 @@ class SafetyValueIterator:
                     print(f"      ||V_^k - V_^k-1||_∞ = {diff_lower:.20e} < {convergence_tol}")
                     print(f"      Converged in {iteration + 1} local iterations")
                     break
-        
+                    # Distribution of successor counts
+            from collections import Counter
+            successor_counts = [len(succ_ids) for succ_ids in self.successor_cache.values()]
+            count_dist = Counter(successor_counts)
+
+                # ============ ADD THIS SECTION START ============
+        # # Compute average successors per cell
+        # print(f"\n{'='*80}")
+        # print("SUCCESSOR STATISTICS")
+        # print(f"{'='*80}")
+
+        # # Group successors by cell
+        # from collections import defaultdict
+        # successors_by_cell = defaultdict(list)
+        # for (cell_id, action), successor_ids in self.successor_cache.items():
+        #     successors_by_cell[cell_id].append(len(successor_ids))
+
+        # # Compute statistics
+        # actions = self.env.get_action_space()
+        # n_cells = len(leaves)
+        # n_actions = len(actions)
+        # total_pairs = len(self.successor_cache)
+
+        # # Per-cell averages
+        # avg_successors_per_cell = []
+        # for cell_id in range(n_cells):
+        #     if cell_id in successors_by_cell:
+        #         avg_for_this_cell = np.mean(successors_by_cell[cell_id])
+        #         avg_successors_per_cell.append(avg_for_this_cell)
+        #     else:
+        #         avg_successors_per_cell.append(0.0)
+
+        # # Overall statistics
+        # overall_avg = np.mean([len(succ_ids) for succ_ids in self.successor_cache.values()])
+        # overall_min = np.min([len(succ_ids) for succ_ids in self.successor_cache.values()])
+        # overall_max = np.max([len(succ_ids) for succ_ids in self.successor_cache.values()])
+        # overall_std = np.std([len(succ_ids) for succ_ids in self.successor_cache.values()])
+
+        # print(f"Total (cell, action) pairs: {total_pairs} ({n_cells} cells × {n_actions} actions)")
+        # print(f"\nSuccessors per (cell, action) pair:")
+        # print(f"  Mean: {overall_avg:.2f}")
+        # print(f"  Std:  {overall_std:.2f}")
+        # print(f"  Min:  {overall_min}")
+        # print(f"  Max:  {overall_max}")
+
+        # # Per-cell statistics
+        # cell_avg_mean = np.mean(avg_successors_per_cell)
+        # cell_avg_std = np.std(avg_successors_per_cell)
+        # cell_avg_min = np.min(avg_successors_per_cell)
+        # cell_avg_max = np.max(avg_successors_per_cell)
+
+        # print(f"\nAverage successors per cell (averaged over actions):")
+        # print(f"  Mean: {cell_avg_mean:.2f}")
+        # print(f"  Std:  {cell_avg_std:.2f}")
+        # print(f"  Min:  {cell_avg_min:.2f}")
+        # print(f"  Max:  {cell_avg_max:.2f}")
+
+        # # Distribution of successor counts
+        # from collections import Counter
+        # successor_counts = [len(succ_ids) for succ_ids in self.successor_cache.values()]
+        # count_dist = Counter(successor_counts)
+
+        # print(f"\nDistribution of successor counts:")
+        # for count in sorted(count_dist.keys()):
+        #     freq = count_dist[count]
+        #     pct = 100 * freq / total_pairs
+        #     bar = '█' * int(pct / 2)  # Simple bar chart
+        #     print(f"  {count:3d} successors: {freq:4d} pairs ({pct:5.1f}%) {bar}")
+
+        # # Cells with zero successors
+        # zero_successor_pairs = [(cell_id, action) for (cell_id, action), succ_ids in self.successor_cache.items() if len(succ_ids) == 0]
+        # cells_with_zero = set(cell_id for cell_id, action in zero_successor_pairs)
+
+        # if len(zero_successor_pairs) > 0:
+        #     print(f"\n⚠️  WARNING: {len(zero_successor_pairs)} (cell, action) pairs have ZERO successors!")
+        #     print(f"   {len(cells_with_zero)}/{n_cells} cells have at least one action with no successors")
+        # else:
+        #     print(f"\n✓ All (cell, action) pairs have at least one successor")
+
+        # print(f"{'='*80}\n")
+        # # ============ ADD THIS SECTION END ============
+
         # Final local iteration summary
         if iteration == max_iterations - 1:
             print(f"    " + "!"*30)
@@ -1318,15 +1595,16 @@ class SafetyValueIterator:
             # Apply conservative correction even if max iterations reached
             if conservative_mode:
                 # MODIFIED: Use min(|delta_k|, delta_max) when max iterations reached too
-                delta_to_use = min(abs(delta_k), delta_max) #if delta_k < 0 else delta_max
+                delta_to_use = abs(delta_k)#delta_to_use = min(abs(delta_k), delta_max) #if delta_k < 0 else delta_max
                 epsilon_cons = (self.gamma * delta_to_use) / (1 - self.gamma)
                 
-                print(f"      Using δ_actual = {delta_to_use:.10e} for correction")
+                # print(f"      Using δ_actual = {delta_to_use:.10e} for correction")
                 print(f"      Applying conservative margin: ε_cons = {epsilon_cons:.10e}")
                 for cell in leaves:
                     cell.V_lower = cell.V_lower - epsilon_cons
                 print(f"      ✓ Conservative correction applied")
         
+    
         print(f"    Local VI completed in {iteration + 1} iterations")
         
         # Print final convergence values
@@ -1426,7 +1704,7 @@ class SafetyValueIterator:
                 if self.env.get_state_dim() == 3:
                     theta_lower = state_at_checkpoint[2] - expansion_i
                     theta_upper = state_at_checkpoint[2] + expansion_i
-                    theta_lower, theta_upper = self.reachability.fix_angle_interval(theta_lower, theta_upper)
+                    # theta_lower, theta_upper = self.reachability.fix_angle_interval(theta_lower, theta_upper)
                     reach_bounds[2, 0] = theta_lower
                     reach_bounds[2, 1] = theta_upper
                 
@@ -1434,22 +1712,27 @@ class SafetyValueIterator:
                 candidates = self.cell_tree.get_intersecting_cells(reach_bounds)
                 
                 for candidate in candidates:
-                    if self.reachability._check_theta_intersection(candidate, reach_bounds):
-                        successor_cell_ids.add(candidate.cell_id)
-            
+                    # if self.reachability._check_theta_intersection(candidate, reach_bounds):
+                    successor_cell_ids.add(candidate.cell_id)
+                        
+            # # ##changed for RA case: If no successors found, add self-loop. checking if solving large values of V issue when no successors and it fixes value to \overline or \underline V
+            # if len(successor_cell_ids) == 0:  ##changed for RA case
+            #     successor_cell_ids.add(cell_id)  ##changed for RA case
+            #     print(f"      Cell {cell_id} with action {action}: No successors, adding self-loop")  ##changed for RA case
+        
             key = (cell_id, action)
             self.successor_cache[key] = list(successor_cell_ids)
         
         elapsed = time.time() - start_time
         print(f"    ✓ Cache updated in {elapsed:.2f}s ({len(ode_tasks)/elapsed:.1f} tasks/s)")
-
-            
+    
     def _identify_boundary_cells(self) -> List[Cell]:
         """Identify boundary cells where V̄_γ(s) > 0 and V_γ(s) < 0."""
         boundary = []
         for cell in self.cell_tree.get_leaves():
             if cell.V_upper is not None and cell.V_lower is not None:
-                if cell.V_upper > 0 and cell.V_lower < 0:
+                # if cell.V_upper > 0 and cell.V_lower < 0:
+                if cell.V_upper > 0 and cell.V_lower <= 0:#THIS IS THE CORRECT ONE FIX LATER
                     boundary.append(cell)
         return boundary
     
@@ -1501,14 +1784,14 @@ class AdaptiveRefinement:
                 f"init_resol_{args.initial_resolution}"
             )
             output_dir = os.path.join(
-                "./results_adaptive_optimized_new_odeint_car_plane_new_fixedhorizon_(dt_thenaddsucc)_new_if delta_k < 0 else delta_max",
+                "./results_RA/fixed_bellmannew/machineeps",
                 f"{rname}_{param_suffix}"
             )
         self.output_dir = output_dir
         
         self.value_iterator = SafetyValueIterator(
             env, gamma, cell_tree, reachability, output_dir,
-            n_workers=args.workers, precompute_successors=args.precompute
+            n_workers=args.workers, precompute_successors=args.precompute,args=args
         )
         self.L_l = env.get_lipschitz_constants()[1]
     
@@ -1551,7 +1834,7 @@ class AdaptiveRefinement:
         
         # Save plot after initial VI
         filename = os.path.join(self.output_dir, "value_function_phase_0_complete.png")
-        plot_value_function(self.env, self.cell_tree, filename, 0)
+        # plot_value_function(self.env, self.cell_tree, filename, 0)
         print(f"Saved initial visualization: {filename}")
         
         # Initial queue state
@@ -1578,6 +1861,7 @@ class AdaptiveRefinement:
             print(f"\n" + "="*70)
             print(f"REFINEMENT PHASE {refinement_iter + 1}")
             print("="*70)
+            phase_start = time.time()
             print(f"Boundary cells: {len(boundary_cells)}")
             print(f"  Refinable (>η_min={eta_min:.6f}): {len(refinable)}")
             print(f"  Below threshold: {len(too_small)}")
@@ -1604,7 +1888,7 @@ class AdaptiveRefinement:
             for cell in refinable:
                 self.cell_tree.refine_cell(cell)
                 new_cells.extend(cell.children)
-            
+
             refinement_time = time.time() - refinement_start
             total_refined += len(refinable)
             
@@ -1616,11 +1900,23 @@ class AdaptiveRefinement:
             
             # Rebuild spatial index after refinements
             print(f"  Rebuilding spatial index...")
+            
+            print(f"    Pre-rebuild: {len(self.cell_tree.leaves)} leaves")
+            non_leaves_before = [c for c in self.cell_tree.leaves if not c.is_leaf]
+            print(f"    Non-leaves before rebuild: {len(non_leaves_before)}")
+
+            
             index_start = time.time()
             self.cell_tree.rebuild_spatial_index()
             index_time = time.time() - index_start
             print(f"    Spatial index rebuilt in {index_time:.3f}s")
-            
+            print(f"    Post-rebuild: {len(self.cell_tree.leaves)} leaves")
+            non_leaves_after = [c for c in self.cell_tree.leaves if not c.is_leaf]
+            print(f"    Non-leaves after rebuild: {len(non_leaves_after)}")
+
+            if len(non_leaves_after) > len(non_leaves_before):
+                print(f"    ❌ ERROR: Rebuild ADDED {len(non_leaves_after) - len(non_leaves_before)} non-leaf cells!")
+                        
             # Initialize new cells
             if new_cells:
                 print(f"  Initializing {len(new_cells)} new cells...")
@@ -1645,9 +1941,160 @@ class AdaptiveRefinement:
             )
             
             local_vi_time = time.time() - local_vi_start
+                # >>> ADD THIS SECTION HERE <
+            ## Local VI convergence summary
+            # print(f"  Local VI completed in {len(conv_upper)} iterations, time: {local_vi_time:.3f}s")
             
+
+            # print(f"\n  Cell classification after Phase {refinement_iter + 1}:")
+            # safe = unsafe = boundary = 0
+            # for cell in self.cell_tree.get_leaves():
+            #     if cell.V_lower is not None and cell.V_upper is not None:
+            #         if cell.V_lower > 0:
+            #             safe += 1
+            #         elif cell.V_upper <= 0:
+            #             unsafe += 1
+            #         else:
+            #             boundary += 1
+
+            # total = self.cell_tree.get_num_leaves()
+            # print(f"    Safe:     {safe:6d} ({100*safe/total:5.1f}%)")
+            # print(f"    Unsafe:   {unsafe:6d} ({100*unsafe/total:5.1f}%)")
+            # print(f"    Boundary: {boundary:6d} ({100*boundary/total:5.1f}%)")
+            # print(f"    Total:    {total:6d}")
+            # >>> END SECTION <
             # Local VI convergence summary
+            
             print(f"  Local VI completed in {len(conv_upper)} iterations, time: {local_vi_time:.3f}s")
+            
+            # >>> INSERT PROBE LOGGING HERE <<<
+            #>>> INSERT PROBE LOGGING HERE <
+# >>> INSERT PROBE LOGGING HERE <
+# >>> INSERT PROBE LOGGING HERE <
+            # x_star = np.array([-3, 3, 3.14])
+            # cell, vl, vu = self.probe_state_value(self.cell_tree, x_star)
+            # if cell is None:
+            #     print(f"[Phase {refinement_iter+1}] x* is not contained in any leaf cell!?")
+            # else:
+            #     print(f"[Phase {refinement_iter+1}] Probing x* = {x_star}:")
+            #     print(f"  Cell ID: {cell.cell_id}")
+            #     print(f"  Center: {cell.center}")
+            #     print(f"  Bounds: x:({cell.bounds[0][0]:.20f},{cell.bounds[0][1]:.20f}), "
+            #         f"y:({cell.bounds[1][0]:.20f},{cell.bounds[1][1]:.20f}), "
+            #         f"theta:({cell.bounds[2][0]:.20f},{cell.bounds[2][1]:.20f})")
+            #     print(f"  V_lower = {vl:.30f}")
+            #     print(f"  V_upper = {vu:.30f}")
+            #     print(f"  l_lower = {cell.l_lower:.8f}")
+            #     print(f"  l_upper = {cell.l_upper:.8f}")
+            #     print(f"  r_lower = {cell.r_lower:.8f}")
+            #     print(f"  r_upper = {cell.r_upper:.8f}")
+                
+            #     # Compute cell radius
+            #     if self.reachability.use_infinity_norm:
+            #         r = 0.5 * cell.get_max_range()
+            #     else:
+            #         ranges = np.array([cell.get_range(j) for j in range(len(cell.bounds))])
+            #         r = 0.5 * np.linalg.norm(ranges)
+            #     print(f"  Cell radius: {r:.8f}")
+                
+            #     # Get all successors for this cell across all actions
+            #     print(f"\n  Successors for Cell {cell.cell_id}:")
+            #     actions = self.env.get_action_space()
+            #     cell_id_to_cell = {c.cell_id: c for c in self.cell_tree.get_leaves()}
+                
+            #     for action in actions:
+            #         cache_key = (cell.cell_id, action)
+            #         if cache_key in self.value_iterator.successor_cache:
+            #             succ_ids = self.value_iterator.successor_cache[cache_key]
+            #             print(f"\n    Action {action:+.3f} → {len(succ_ids)} successors:")
+                        
+            #             # Compute trajectory for this action
+            #             checkpoint_states = self.env.dynamics_multi_step(
+            #                 cell.center, action, self.reachability.tau, self.reachability.dt
+            #             )
+                        
+            #             # Show reachable bounds at each checkpoint
+            #             print(f"      Reachable bounds at checkpoints:")
+            #             for i, state_at_checkpoint in enumerate(checkpoint_states):
+            #                 growth_factor_i = self.reachability.growth_factors[i]
+            #                 expansion_i = r * growth_factor_i
+                            
+            #                 reach_bounds = np.zeros((self.env.get_state_dim(), 2))
+            #                 reach_bounds[0, 0] = state_at_checkpoint[0] - expansion_i
+            #                 reach_bounds[0, 1] = state_at_checkpoint[0] + expansion_i
+            #                 reach_bounds[1, 0] = state_at_checkpoint[1] - expansion_i
+            #                 reach_bounds[1, 1] = state_at_checkpoint[1] + expansion_i
+                            
+            #                 theta_lower = state_at_checkpoint[2] - expansion_i
+            #                 theta_upper = state_at_checkpoint[2] + expansion_i
+            #                 reach_bounds[2, 0] = theta_lower
+            #                 reach_bounds[2, 1] = theta_upper
+                            
+            #                 t = self.reachability.checkpoint_times[i]
+            #                 print(f"        t={t:.3f}s: state=({state_at_checkpoint[0]:+.6f}, {state_at_checkpoint[1]:+.6f}, {state_at_checkpoint[2]:+.6f})")
+            #                 print(f"          expansion={expansion_i:.6f}, growth_factor={growth_factor_i:.6f}")
+            #                 print(f"          x:[{reach_bounds[0,0]:+.6f}, {reach_bounds[0,1]:+.6f}]")
+            #                 print(f"          y:[{reach_bounds[1,0]:+.6f}, {reach_bounds[1,1]:+.6f}]")
+            #                 print(f"          θ:[{reach_bounds[2,0]:+.6f}, {reach_bounds[2,1]:+.6f}]")
+                        
+            #             if len(succ_ids) == 0:
+            #                 print(f"      (No successors)")
+            #             else:
+            #                 print(f"\n      Successor cells:")
+            #                 for succ_id in succ_ids:
+            #                     if succ_id in cell_id_to_cell:
+            #                         succ = cell_id_to_cell[succ_id]
+            #                         print(f"        Cell {succ.cell_id}:")
+            #                         print(f"          Bounds: x:({succ.bounds[0][0]:+.6f},{succ.bounds[0][1]:+.6f}), "
+            #                               f"y:({succ.bounds[1][0]:+.6f},{succ.bounds[1][1]:+.6f}), "
+            #                               f"theta:({succ.bounds[2][0]:+.6f},{succ.bounds[2][1]:+.6f})")
+            #                         print(f"          V_lower = {succ.V_lower:.30f}, V_upper = {succ.V_upper:.30f}")
+            #                         print(f"          l_lower = {succ.l_lower:.8f}, l_upper = {succ.l_upper:.8f}")
+            #                         print(f"          r_lower = {succ.r_lower:.8f}, r_upper = {succ.r_upper:.8f}")
+                                    
+            #                         # NEW: Show successors of this successor (one more layer)
+            #                         print(f"          Successors of Cell {succ.cell_id}:")
+            #                         for action2 in actions:
+            #                             cache_key2 = (succ.cell_id, action2)
+            #                             if cache_key2 in self.value_iterator.successor_cache:
+            #                                 succ_succ_ids = self.value_iterator.successor_cache[cache_key2]
+            #                                 print(f"            Action {action2:+.3f} → {len(succ_succ_ids)} successors")
+                                            
+            #                                 if len(succ_succ_ids) > 0:
+            #                                     # Show details of each successor's successor
+            #                                     for succ_succ_id in succ_succ_ids[:3]:  # Limit to first 3 to avoid clutter
+            #                                         if succ_succ_id in cell_id_to_cell:
+            #                                             succ_succ = cell_id_to_cell[succ_succ_id]
+            #                                             print(f"              → Cell {succ_succ.cell_id}:")
+            #                                             print(f"                 Bounds: x:({succ_succ.bounds[0][0]:+.6f},{succ_succ.bounds[0][1]:+.6f}), "
+            #                                                   f"y:({succ_succ.bounds[1][0]:+.6f},{succ_succ.bounds[1][1]:+.6f}), "
+            #                                                   f"theta:({succ_succ.bounds[2][0]:+.6f},{succ_succ.bounds[2][1]:+.6f})")
+            #                                             print(f"                 V_lower={succ_succ.V_lower:.30f}, V_upper={succ_succ.V_upper:.30f}")
+            #                                             print(f"                 l_lower={succ_succ.l_lower:.6f}, r_lower={succ_succ.r_lower:.6f}")
+                                                        
+            #                                             # NEW: Count successors of this third-layer cell
+            #                                             total_third_layer_succs = 0
+            #                                             for action3 in actions:
+            #                                                 cache_key3 = (succ_succ.cell_id, action3)
+            #                                                 if cache_key3 in self.value_iterator.successor_cache:
+            #                                                     total_third_layer_succs += len(self.value_iterator.successor_cache[cache_key3])
+            #                                             print(f"                 Total successors (all actions): {total_third_layer_succs}")
+                                                        
+            #                                     if len(succ_succ_ids) > 3:
+            #                                         print(f"              ... and {len(succ_succ_ids) - 3} more")
+            #                             else:
+            #                                 print(f"            Action {action2:+.3f}: (no cache entry)")
+                                    
+            #                     else:
+            #                         print(f"        Cell {succ_id}: (not found in current leaves)")
+            #         else:
+            #             print(f"\n    Action {action:+.3f}: (no cache entry)")
+                
+                # print("-"*60)
+            # >>> END INSERT <
+            # >>> END INSERT <
+            # >>> END INSERT <
+            # >>> END INSERT <<<
             if len(conv_upper) > 0:
                 final_upper = conv_upper[-1] if len(conv_upper) > 0 else float('inf')
                 final_lower = conv_lower[-1] if len(conv_lower) > 0 else float('inf')
@@ -1659,12 +2106,15 @@ class AdaptiveRefinement:
                 self.output_dir, 
                 f"value_function_phase_{refinement_iter + 1}_complete.png"
             )
+
             plot_value_function(self.env, self.cell_tree, filename, refinement_iter + 1)
             print(f"  Saved visualization: {filename}")
             
             # Phase completion summary
-            phase_time = time.time() - refinement_start
-            print(f"  Phase {refinement_iter + 1} completed in {phase_time:.3f}s")
+            phase_time = time.time() - phase_start  # Use phase_start instead
+            phase_num_leaves = self.cell_tree.get_num_leaves()
+            # print(f"  Phase {refinement_iter + 1} completed in {phase_time:.3f}s")
+            print(f"  Phase {refinement_iter + 1} completed in {phase_time:.2f}s with {phase_num_leaves} leaf cells")
             
             refinement_iter += 1
         
@@ -1689,6 +2139,13 @@ class AdaptiveRefinement:
         self._print_statistics()
         self.reachability.print_debug_summary()
         print(f"\n✓ All results saved to: {self.output_dir}/")
+        
+    def probe_state_value(self,cell_tree, x_star):
+        for cell in cell_tree.get_leaves():
+            if cell.contains_point(x_star):
+                return cell, cell.V_lower, cell.V_upper
+        return None, None, None
+
     def _identify_boundary_cells(self) -> List[Cell]:
         """Identify boundary cells where V̄_γ(s) > 0 and V_γ(s) < 0."""
         # CHANGED: Now uses V_lower directly (which may contain conservative correction)
@@ -1726,10 +2183,11 @@ def plot_value_function(
 ):
     """Plots 2D slices of the 3D value function for Dubins car."""
     if theta_slices is None:
-        theta_slices = [0, np.pi/4, np.pi/2, np.pi]
+        # theta_slices = [0, np.pi/4, np.pi/2, np.pi]
+        theta_slices = [0,np.pi,np.pi/4,-np.pi/4,np.pi/2,-np.pi/2]
     
     n_slices = len(theta_slices)
-    fig, axes = plt.subplots(3, n_slices, figsize=(5*n_slices, 14),dpi=800)
+    fig, axes = plt.subplots(3, n_slices, figsize=(5*n_slices, 14),dpi=600)
     
     if n_slices == 1:
         axes = axes.reshape(3, 1)
@@ -1755,6 +2213,7 @@ def plot_value_function(
     plt.savefig(filename, dpi=800, bbox_inches='tight')
     plt.close()
 
+
 def _plot_slice(
     env: Environment,
     cell_tree: CellTree,
@@ -1763,7 +2222,8 @@ def _plot_slice(
     label: str,
     upper: bool
 ):
-    """Plot value function by directly coloring leaf cells."""
+    """Plot value function by directly coloring leaf cells with values displayed."""
+
     bounds = env.get_state_bounds()
     x_min, x_max = bounds[0]
     y_min, y_max = bounds[1]
@@ -1771,20 +2231,23 @@ def _plot_slice(
     # Collect values from all relevant cells to determine color scale
     values = []
     relevant_cells = []
-    
+    # cells_for_this_theta = []
     for cell in cell_tree.get_leaves():
+
         # Only consider cells whose theta range includes this slice
         theta_min, theta_max = cell.bounds[2]
+
         if not (theta_min <= theta <= theta_max):
             continue
-        
+
         if upper and cell.V_upper is not None:
-            values.append(cell. V_upper)
+            values.append(cell.V_upper)
             relevant_cells.append((cell, cell.V_upper))
+
         elif not upper and cell.V_lower is not None:
             values.append(cell.V_lower)
             relevant_cells.append((cell, cell.V_lower))
-    
+
     if not values:
         ax.text(0.5, 0.5, 'No data for this slice', 
                 transform=ax.transAxes, ha='center', va='center')
@@ -1792,20 +2255,7 @@ def _plot_slice(
         ax.set_ylim(y_min, y_max)
         return
     
-    # NEW: Print value statistics to terminal
-    # if upper:
-    #     print(f"    V̄_γ statistics (θ={theta:.2f}): min={min(values):.40f}, max={max(values):.40f}")
-    # else:
-    #     print(f"    V_γ statistics (θ={theta:.2f}): min={min(values):.40f}, max={max(values):.40f}")
-    
     # Determine color scale
-    # Determine color scale
-    # Determine color scale
-    from matplotlib.colors import TwoSlopeNorm, Normalize
-    from matplotlib.ticker import ScalarFormatter, FormatStrFormatter
-    cmap = plt.cm.RdYlGn
-
-    # --- FIXED COLOR NORMALIZATION ---
     from matplotlib.colors import Normalize
     from matplotlib.ticker import FuncFormatter
     cmap = plt.cm.RdYlGn
@@ -1818,7 +2268,6 @@ def _plot_slice(
 
     # If all values are negative, still use full colormap range (no white)
     if vmax <= 0:
-        # shift range so that colormap still covers dark to bright
         norm = Normalize(vmin=vmin, vmax=0)
     elif vmin >= 0:
         norm = Normalize(vmin=0, vmax=vmax)
@@ -1826,23 +2275,60 @@ def _plot_slice(
         # mixed sign values
         norm = Normalize(vmin=vmin, vmax=vmax)
 
-    # # Plot each cell as a colored rectangle
+    # Plot each cell as a colored rectangle with value text
     for cell, value in relevant_cells:
         a_x, b_x = cell.bounds[0]
         a_y, b_y = cell.bounds[1]
         color = cmap(norm(value))
+        
+        # Draw rectangle
         rect = Rectangle((a_x, a_y), b_x - a_x, b_y - a_y,
-                         facecolor=color, edgecolor='black', linewidth=0.005,antialiased=False, alpha=1.0)
+                         facecolor=color, edgecolor='black', linewidth=0.005,
+                         antialiased=False, alpha=1.0)
         ax.add_patch(rect)
+        
+        # Add text label with value at cell center
+        cell_width = b_x - a_x
+        cell_height = b_y - a_y
+        
+        # Only add text if cell is large enough
+        min_cell_size = 0.05
+        if cell_width > min_cell_size and cell_height > min_cell_size:
+            cx = (a_x + b_x) / 2
+            cy = (a_y + b_y) / 2
+            
+            # Format value in scientific notation (short format)
+            text = f'{value:.1e}'
+            
+            # Choose text color based on background brightness
+            normalized_value = norm(value)
+            text_color = 'black' if normalized_value > 0.5 else 'white'
+            
+            # Determine font size to fit within cell
+            fontsize = min(cell_width * 15, cell_height * 15, 6)
+            
+            ax.text(cx, cy, text, 
+                   ha='center', va='center',
+                   fontsize=fontsize, 
+                   color=text_color,
+                   weight='normal',
+                   clip_on=True)
 
     # Draw obstacle
     if isinstance(env, DubinsCarEnvironment):
-        obstacle = Circle(env.obstacle_position, env.obstacle_radius, #make them consistent TODO
+        obstacle = Circle(env.obstacle_position, env.obstacle_radius,
                           facecolor='none', edgecolor='darkblue', linewidth=2, zorder=10)
+        ax.add_patch(obstacle)
+        
+        # Draw target set  ##changed for RA case
+        target = Circle(env.target_position, env.target_radius,  ##changed for RA case
+                       facecolor='none', edgecolor='orange', linewidth=2, zorder=10, linestyle='--')  ##changed for RA case
+        ax.add_patch(target)  ##changed for RA case
+        
     elif isinstance(env, EvasionEnvironment):
-        obstacle = Circle(env.obstacle_position, env.obstacle_radius, #make them consistent TODO
+        obstacle = Circle(env.obstacle_position, env.obstacle_radius,
                           facecolor='none', edgecolor='darkblue', linewidth=2, zorder=10)
-    ax.add_patch(obstacle)
+        ax.add_patch(obstacle)
 
     ax.set_xlabel('x')
     ax.set_ylabel('y')
@@ -1857,42 +2343,21 @@ def _plot_slice(
     sm.set_array([])
     cbar = plt.colorbar(sm, ax=ax, label=label)
 
-    # --- Use scientific notation ---
+    # Use scientific notation
     cbar.ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:.1e}'))
     cbar.ax.yaxis.get_offset_text().set_visible(False)
 
-    # --- Set evenly spaced ticks, excluding the very top (vmax) ---
-    tick_vals = np.linspace(vmin, vmax, 5)
-    tick_vals = tick_vals[:-1]  # remove top tick to avoid overlap
-    # cbar.set_ticks(tick_vals)
-    # cbar.update_ticks()
-
-    # optional: pad labels slightly away from bar to avoid clipping
-    # cbar.ax.tick_params(pad=2)
-
-
-    # Explicit ticks (optional)
-    cbar.ax.yaxis.offsetText.set_visible(False)
     def safe_ticks(vmin, vmax, zero_threshold=0.1):
-        """
-        Plot vmin, vmax, and optionally 0 if both are sufficiently far from 0.
-        """
+        """Plot vmin, vmax, and optionally 0 if both are sufficiently far from 0."""
         ticks = [vmin, vmax]
-
-        # include 0 only if both sides are at least ±zero_threshold away from zero
         if abs(vmin) >= zero_threshold and abs(vmax) >= zero_threshold:
             ticks.insert(1, 0.0)
-
-        # Ensure unique and sorted ticks (helps with colorbar orientation)
         ticks = sorted(set(ticks))
         return ticks
 
     tick_vals = safe_ticks(vmin, vmax)
     cbar.set_ticks(tick_vals)
     cbar.ax.set_yticklabels([f'{v:.1e}' for v in tick_vals])
-
-    
-    
 def _plot_classification_slice(
     env: Environment,
     cell_tree: CellTree,
@@ -1923,7 +2388,7 @@ def _plot_classification_slice(
             color = C_UNKNOWN
         elif cell.V_lower > 0:
             color = C_SAFE
-        elif cell.V_upper < 0:
+        elif cell.V_upper <= 0:##changed this##changed this##changed this
             color = C_UNSAFE
         else:
             color = C_BOUND
@@ -1941,30 +2406,20 @@ def _plot_classification_slice(
         )
         ax.add_patch(rect)
 
-
-    
     # Draw obstacle
-    
     if isinstance(env, DubinsCarEnvironment):
-        obstacle = Circle(
-            env.obstacle_position,
-            env.obstacle_radius,
-            facecolor='none',
-            edgecolor='darkblue',
-            linewidth=2,
-            zorder=10
-        )
+        obstacle = Circle(env.obstacle_position, env.obstacle_radius,
+                          facecolor='none', edgecolor='darkblue', linewidth=2, zorder=10)
         ax.add_patch(obstacle)
+        
+        # Draw target set  ##changed for RA case
+        target = Circle(env.target_position, env.target_radius,  ##changed for RA case
+                       facecolor='none', edgecolor='orange', linewidth=2, zorder=10, linestyle='--')  ##changed for RA case
+        ax.add_patch(target)  ##changed for RA case
+        
     elif isinstance(env, EvasionEnvironment):
-        obstacle = Circle(
-            (0, 0),
-            env.obstacle_radius,
-            facecolor='none',
-            edgecolor='darkblue',
-            linewidth=2,
-            zorder=10
-        )
-
+        obstacle = Circle((0, 0), env.obstacle_radius,
+                          facecolor='none', edgecolor='darkblue', linewidth=2, zorder=10)
         ax.add_patch(obstacle)
     
     ax.set_xlabel('x')
@@ -1973,7 +2428,6 @@ def _plot_classification_slice(
     ax.set_ylim(y_min, y_max)
     ax.set_aspect('equal')
     ax.grid(False)
-    
     # Legend
     # legend_elems = [
     #     Patch(facecolor=C_SAFE, edgecolor='black', label='Safe (V_>0)'),
@@ -2017,9 +2471,9 @@ def run_algorithm_2(args, env):
     print("ALGORITHM 2/3: Adaptive Refinement")
     print("="*70)
     print(f"Environment: {type(env).__name__}")
-    L_f, _ = env.get_lipschitz_constants()
-    if args.gamma * L_f >= 1:
-        raise ValueError(f"Contraction condition violated: γL_f = {args.gamma * L_f} >= 1")
+    # L_f, _ = env.get_lipschitz_constants()
+    # if args.gamma * L_f >= 1:
+    #     raise ValueError(f"Contraction condition violated: γL_f = {args.gamma * L_f} >= 1")
     cell_tree = CellTree(env.get_state_bounds(), initial_resolution=args.initial_resolution)
     reachability = GronwallReachabilityAnalyzer(env)
     adaptive = AdaptiveRefinement(args, env, args.gamma, cell_tree, reachability)
@@ -2067,11 +2521,11 @@ def main():
                        help="Maximum value iterations (Algorithm 1)")
     parser.add_argument('--tolerance', type=float, default=1e-13,
                        help="Convergence tolerance")
-    parser.add_argument('--plot-freq', type=int, default=1000, #dont create intermediate plots
+    parser.add_argument('--plot-freq', type=int, default=12, #dont create intermediate plots
                        help="Plot frequency in iterations (Algorithm 1)")
     parser.add_argument('--epsilon', type=float, default=0.1,
                        help="Error tolerance for refinement (Algorithm 2)")
-    parser.add_argument('--initial-resolution', type=int, default=8,
+    parser.add_argument('--initial-resolution', type=int, default=15,
                        help="Initial coarse grid resolution (Algorithm 2)")
     parser.add_argument('--refinements', type=int, default=100,
                        help="Maximum refinement iterations (Algorithm 2)")
@@ -2116,139 +2570,24 @@ def main():
 if __name__ == "__main__":
     main()
     
-    
-# python safety_value_function_4_ris_all_leaves_optimized_new_newstopcondition_dubins_aircraft.py \
-#   --algorithm 2 \
-#   --dynamics dubins \
-#   --gamma 0.2 \
-#   --dt 0.05 \
-#   --velocity 1.0 \
-#   --epsilon 0.04 \
-#   --vi-iterations 1000 \
-#  --initial-resolution 1
-
-# python safety_value_function_4_ris_all_leaves_optimized_new_newstopcondition_dubins_aircraft.py \
-#   --algorithm 2 \
-#   --dynamics evasion \
-#   --gamma 0.49 \
-#   --dt 0.05 \
-#   --velocity 1.0 \
-#   --epsilon 0.04 \
-#   --vi-iterations 1000 \
-#  --initial-resolution 1
-
-
-
-
-
-
-    
-    '''
-    
-    def test_lipschitz_constants(env, n_samples=10000):
-        """Empirically verify Lipschitz constants"""
-        
-        max_L_f_observed = 0
-        max_L_l_observed = 0
-        
-        for _ in range(n_samples):
-            # Random states
-            x = np.random.uniform(env.state_bounds[:, 0], env.state_bounds[:, 1])
-            x_prime = np.random.uniform(env.state_bounds[:, 0], env.state_bounds[:, 1])
-            
-            # Random action
-            u = np.random.choice(env.actions)
-            
-            # Test L_f
-            f_x = env._evasion_ode(x, 0, u)
-            f_x_prime = env._evasion_ode(x_prime, 0, u)
-            
-            state_diff_inf = np.max(np.abs(x - x_prime))
-            dynamics_diff_inf = np.max(np.abs(np.array(f_x) - np.array(f_x_prime)))
-            
-            if state_diff_inf > 1e-6:  # Avoid division by near-zero
-                L_f_sample = dynamics_diff_inf / state_diff_inf
-                max_L_f_observed = max(max_L_f_observed, L_f_sample)
-            
-            # Test L_l
-            l_x = env.failure_function(x)
-            l_x_prime = env.failure_function(x_prime)
-            
-            failure_diff = abs(l_x - l_x_prime)
-            
-            if state_diff_inf > 1e-6:
-                L_l_sample = failure_diff / state_diff_inf
-                max_L_l_observed = max(max_L_l_observed, L_l_sample)
-        
-        print(f"Observed max L_f: {max_L_f_observed:.6f} (claimed: {env.L_f})")
-        print(f"Observed max L_l: {max_L_l_observed:.6f} (claimed: {env.L_l})")
-        
-        return max_L_f_observed, max_L_l_observed
-
-    # Test it
-    env = EvasionEnvironment(v_const=1.0)
-    test_lipschitz_constants(env)
-    #Observed max L_f: 1.903273 (claimed: 2.0)
-    #Observed max L_l: 1.397104 (claimed: 1.4142135623730951)
-    
-
-    def test_lipschitz_constants(env, n_samples=10000):
-        """Empirically verify Lipschitz constants"""
-        
-        max_L_f_observed = 0
-        max_L_l_observed = 0
-        
-        for _ in range(n_samples):
-            # Random states
-            x = np.random.uniform(env.state_bounds[:, 0], env.state_bounds[:, 1])
-            x_prime = np.random.uniform(env.state_bounds[:, 0], env.state_bounds[:, 1])
-            
-            # Random action
-            u = np.random.choice(env.actions)
-            
-            # Test L_f
-            f_x = env._dubins_ode(x, 0, u)
-            f_x_prime = env._dubins_ode(x_prime, 0, u)
-            
-            state_diff_inf = np.max(np.abs(x - x_prime))
-            dynamics_diff_inf = np.max(np.abs(np.array(f_x) - np.array(f_x_prime)))
-            
-            if state_diff_inf > 1e-6:  # Avoid division by near-zero
-                L_f_sample = dynamics_diff_inf / state_diff_inf
-                max_L_f_observed = max(max_L_f_observed, L_f_sample)
-            
-            # Test L_l
-            l_x = env.failure_function(x)
-            l_x_prime = env.failure_function(x_prime)
-            
-            failure_diff = abs(l_x - l_x_prime)
-            
-            if state_diff_inf > 1e-6:
-                L_l_sample = failure_diff / state_diff_inf
-                max_L_l_observed = max(max_L_l_observed, L_l_sample)
-        
-        print(f"Observed max L_f: {max_L_f_observed:.6f} (claimed: {env.L_f})")
-        print(f"Observed max L_l: {max_L_l_observed:.6f} (claimed: {env.L_l})")
-        
-        return max_L_f_observed, max_L_l_observed
-
-
-    # Test it
-    env = DubinsCarEnvironment(v_const=1.0)
-    # Observed max L_f: 0.990269 (claimed: 1.0)
-    # Observed max L_l: 1.410656 (claimed: 1)
-    test_lipschitz_constants(env)
-    '''
-    
-    
-#     python safety_value_function_4_ris_all_leaves_optimized_new_newstopcondition_dubins_aircraft.py \
-#   --algorithm 2 \
-#   --dynamics evasion \
-#   --gamma 0.49 \
-#   --dt 0.05 \
-#   --velocity 1.0 \
-#   --epsilon 0.04 \
-#   --vi-iterations 1000 \
-#  --initial-resolution 1 \
-#   --conservative \
-#   --delta-max 1e-13
+# caffeinate -id python -u safety_value_function_4_ris_all_leaves_optimized_new_newstopcondition_dubins_aircraft.py \
+# --algorithm 2 \
+#     --resolution 50 \
+#         --iterations 2002 \
+#             --gamma  0.9 --dt 0.2 \
+#                 --tau 0.6 --tolerance 1e-13 \
+#                     --initial-resolution 2 --vi-iterations 100001\
+#                         --eps 0.05 --dynamics dubins  --conservative  \
+#                             --delta-max 1e-13 \
+#                                  2>&1 | tee ./run_log_dubins.txt
+                                 
+#  caffeinate -id  python -u safety_value_function_4_ris_all_leaves_optimized_new_newstopcondition_dubins_aircraft.py \
+# --algorithm 2 \
+#     --resolution 50 \
+#         --iterations 2002 \
+#             --gamma  0.3 --dt 0.25 \
+#                 --tau 0.5 --tolerance 0.000000000000001 \
+#                     --initial-resolution 2 --vi-iterations 100001\
+#                         --eps 0.05 --dynamics evasion  --conservative  \
+#                             --delta-max 1e-13 \
+#                                  2>&1 | tee ./run_log_evasion.txt
