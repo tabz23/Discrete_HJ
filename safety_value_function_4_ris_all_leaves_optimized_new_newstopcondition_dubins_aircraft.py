@@ -93,115 +93,6 @@ class Environment(ABC):
 # Dubins Car Environment (Unchanged)
 # ----------------------------------------------------------------------------
 
-# class DubinsCarEnvironment(Environment):
-#     def __init__(self, v_const: float = 1.0, dt: float = 0.1, tau: float = 1.0,
-#                  state_bounds: np.ndarray = None, obstacle_position: np.ndarray = None,
-#                  obstacle_radius: float = 0.5,
-#                  target_position: np.ndarray = None, target_radius: float = 0.5):  ##changed for RA case - added target params
-                 
-        
-#         # Validate before anything else
-#         ratio = tau / dt
-#         n_steps = int(np.round(ratio))
-        
-#         # Check if ratio is close to an integer (not using modulo!)
-#         if not np.isclose(ratio, n_steps, rtol=1e-9, atol=1e-9):
-#             raise ValueError(
-#                 f"tau ({tau}) must be evenly divisible by dt ({dt}). "
-#                 f"Current tau/dt = {ratio:.10f} (should be ~{n_steps}). "
-#                 f"Try tau={dt * n_steps} or dt={tau / n_steps}"
-#             )
-        
-#         self.v_const = v_const
-#         self.dt = dt
-#         self.tau = tau
-#         self.n_steps = int(np.round(tau / dt))
-        
-
-        
-#         if state_bounds is None:
-#             self.state_bounds = np.array([[-3.0, 3.0], [-3.0, 3.0], [-np.pi, np.pi]])
-#         else:
-#             self.state_bounds = state_bounds
-        
-#         if obstacle_position is None:
-#             self.obstacle_position = np.array([0.0, 0.0])
-#         else:
-#             self.obstacle_position = obstacle_position
-            
-#         self.obstacle_radius = obstacle_radius
-        
-#         # Target set parameters  ##changed for RA case
-#         if target_position is None:  ##changed for RA case
-#             self.target_position = np.array([2.5, 0])  ##changed for RA case
-#         else:  ##changed for RA case
-#             self.target_position = target_position  ##changed for RA case
-            
-#         self.target_radius = target_radius  ##changed for RA case
-#         # Lipschitz constants
-#         self.L_f = v_const
-#         self.L_l = np.sqrt(2)
-#         self.L_r = np.sqrt(2)  ##changed for RA case - same as L_l since target is also a circle
-#         self.actions = [-1.0, 0.0, 1.0]
-    
-#     def get_state_bounds(self) -> np.ndarray:
-#         return self.state_bounds
-    
-#     def get_action_space(self) -> List:
-#         return self.actions
-    
-#     def _dubins_ode(self, state: np.ndarray, t: float, action: float) -> np.ndarray:
-#         x, y, theta = state
-#         dx_dt = self.v_const * np.cos(theta)
-#         dy_dt = self.v_const * np.sin(theta)
-#         dtheta_dt = action
-#         return np.array([dx_dt, dy_dt, dtheta_dt])
-    
-#     def dynamics(self, state: np.ndarray, action: float) -> np.ndarray:
-#         """Single step dynamics for duration tau"""
-#         t_span = [0, self.tau]
-#         solution = odeint(self._dubins_ode, state, t_span, args=(action,), atol=1e-12, rtol=1e-12)
-#         state_next = solution[-1]
-#         # Normalize theta to [-π, π]
-#         theta_next = np.arctan2(np.sin(state_next[2]), np.cos(state_next[2]))
-#         state_next[2] = theta_next
-#         return state_next
-    
-#     def dynamics_multi_step(self, state: np.ndarray, action: float, duration: float, dt: float) -> List[np.ndarray]:
-#         """
-#         Integrate dynamics and return states at checkpoints.
-#         Returns states at times [dt, 2*dt, 3*dt, ..., duration]
-#         """
-#         n_steps = int(np.ceil(duration / dt))
-#         t_eval = np.linspace(0, duration, n_steps + 1)  # Include t=0
-        
-#         solution = odeint(self._dubins_ode, state, t_eval, args=(action,), atol=1e-12, rtol=1e-12)
-        
-#         # Normalize theta for all states
-#         states = []
-#         for s in solution[1:]:  # Skip initial state
-#             theta_normalized = np.arctan2(np.sin(s[2]), np.cos(s[2]))
-#             s[2] = theta_normalized
-#             states.append(s.copy())
-        
-#         return states
-
-#     def failure_function(self, state: np.ndarray) -> float:
-#         pos = state[:2]
-#         dist_to_obstacle = np.linalg.norm(pos - self.obstacle_position)
-#         return (dist_to_obstacle - self.obstacle_radius)
-    
-#     def reward_function(self, state: np.ndarray) -> float:  ##changed for RA case
-#         """Negative signed distance to target circle (positive inside target)"""  ##changed for RA case
-#         pos = state[:2]  ##changed for RA case
-#         dist_to_target = np.linalg.norm(pos - self.target_position)  ##changed for RA case
-#         return -(dist_to_target - self.target_radius)  ##changed for RA case
-    
-#     def get_lipschitz_constants(self) -> Tuple[float, float, float]:  ##changed for RA case
-#         return self.L_f, self.L_l, self.L_r  ##changed for RA case
-    
-#     def get_state_dim(self) -> int:
-#         return 3
 class DubinsCarEnvironment(Environment):
     def __init__(self, v_const: float = 1.0, dt: float = 0.1, tau: float = 1.0,
                  state_bounds: np.ndarray = None, obstacle_position: np.ndarray = None,
@@ -250,7 +141,7 @@ class DubinsCarEnvironment(Environment):
         # Lipschitz constants
         self.L_f = v_const
         self.L_l = np.sqrt(2)
-        self.L_r = 1.0  # Linear function of position  
+        self.L_r = np.sqrt(2)  ##changed for RA case - same as L_l since target is also a circle
         self.actions = [-1.0, 0.0, 1.0]
     
     def get_state_bounds(self) -> np.ndarray:
@@ -299,45 +190,154 @@ class DubinsCarEnvironment(Environment):
         pos = state[:2]
         dist_to_obstacle = np.linalg.norm(pos - self.obstacle_position)
         return (dist_to_obstacle - self.obstacle_radius)
-        
-    def reward_function(self, state: np.ndarray) -> float:
-        """
-        Reward function for reach-avoid with boundary target zone:
-        - Positive when OUTSIDE the inner box [-2.8, 2.8] × [-2.8, 2.8]
-        - Negative when inside the inner box
-        
-        Returns negative signed distance to inner box boundary
-        (positive in the outer "safety zone")
-        """
-        x, y = state[0], state[1]
-        
-        # Inner box boundaries (target is OUTSIDE this box)
-        inner_x_min, inner_x_max = -2.5, 2.5
-        inner_y_min, inner_y_max = -2.5, 2.5
-        
-        # Distance from inner box boundaries (positive when inside inner box)
-        dist_to_inner_x_min = x - inner_x_min  # positive if x > -2.5
-        dist_to_inner_x_max = inner_x_max - x  # positive if x < 2.5
-        dist_to_inner_y_min = y - inner_y_min  # positive if y > -2.5
-        dist_to_inner_y_max = inner_y_max - y  # positive if y < 2.5
-        
-        # Minimum distance to inner box boundary
-        min_dist_to_inner_boundary = min(
-            dist_to_inner_x_min, 
-            dist_to_inner_x_max,
-            dist_to_inner_y_min, 
-            dist_to_inner_y_max
-        )
-        
-        # Return NEGATIVE of distance
-        # Positive when OUTSIDE [-2.5, 2.5]² (in the green safety zone)
-        # Negative when INSIDE [-2.5, 2.5]² (still need to reach safety)
-        return -min_dist_to_inner_boundary
+    
+    def reward_function(self, state: np.ndarray) -> float:  ##changed for RA case
+        """Negative signed distance to target circle (positive inside target)"""  ##changed for RA case
+        pos = state[:2]  ##changed for RA case
+        dist_to_target = np.linalg.norm(pos - self.target_position)  ##changed for RA case
+        return -(dist_to_target - self.target_radius)  ##changed for RA case
+    
     def get_lipschitz_constants(self) -> Tuple[float, float, float]:  ##changed for RA case
         return self.L_f, self.L_l, self.L_r  ##changed for RA case
     
     def get_state_dim(self) -> int:
         return 3
+# class DubinsCarEnvironment(Environment):
+#     def __init__(self, v_const: float = 1.0, dt: float = 0.1, tau: float = 1.0,
+#                  state_bounds: np.ndarray = None, obstacle_position: np.ndarray = None,
+#                  obstacle_radius: float = 0.5,
+#                  target_position: np.ndarray = None, target_radius: float = 0.5):  ##changed for RA case - added target params
+                 
+        
+#         # Validate before anything else
+#         ratio = tau / dt
+#         n_steps = int(np.round(ratio))
+        
+#         # Check if ratio is close to an integer (not using modulo!)
+#         if not np.isclose(ratio, n_steps, rtol=1e-9, atol=1e-9):
+#             raise ValueError(
+#                 f"tau ({tau}) must be evenly divisible by dt ({dt}). "
+#                 f"Current tau/dt = {ratio:.10f} (should be ~{n_steps}). "
+#                 f"Try tau={dt * n_steps} or dt={tau / n_steps}"
+#             )
+        
+#         self.v_const = v_const
+#         self.dt = dt
+#         self.tau = tau
+#         self.n_steps = int(np.round(tau / dt))
+        
+
+        
+#         if state_bounds is None:
+#             self.state_bounds = np.array([[-3.0, 3.0], [-3.0, 3.0], [-np.pi, np.pi]])
+#         else:
+#             self.state_bounds = state_bounds
+        
+#         if obstacle_position is None:
+#             self.obstacle_position = np.array([0.0, 0.0])
+#         else:
+#             self.obstacle_position = obstacle_position
+            
+#         self.obstacle_radius = obstacle_radius
+        
+#         # Target set parameters  ##changed for RA case
+#         if target_position is None:  ##changed for RA case
+#             self.target_position = np.array([2.5, 0])  ##changed for RA case
+#         else:  ##changed for RA case
+#             self.target_position = target_position  ##changed for RA case
+            
+#         self.target_radius = target_radius  ##changed for RA case
+#         # Lipschitz constants
+#         self.L_f = v_const
+#         self.L_l = np.sqrt(2)
+#         self.L_r = 1.0  # Linear function of position  
+#         self.actions = [-1.0, 0.0, 1.0]
+    
+#     def get_state_bounds(self) -> np.ndarray:
+#         return self.state_bounds
+    
+#     def get_action_space(self) -> List:
+#         return self.actions
+    
+#     def _dubins_ode(self, state: np.ndarray, t: float, action: float) -> np.ndarray:
+#         x, y, theta = state
+#         dx_dt = self.v_const * np.cos(theta)
+#         dy_dt = self.v_const * np.sin(theta)
+#         dtheta_dt = action
+#         return np.array([dx_dt, dy_dt, dtheta_dt])
+    
+#     def dynamics(self, state: np.ndarray, action: float) -> np.ndarray:
+#         """Single step dynamics for duration tau"""
+#         t_span = [0, self.tau]
+#         solution = odeint(self._dubins_ode, state, t_span, args=(action,), atol=1e-12, rtol=1e-12)
+#         state_next = solution[-1]
+#         # Normalize theta to [-π, π]
+#         theta_next = np.arctan2(np.sin(state_next[2]), np.cos(state_next[2]))
+#         state_next[2] = theta_next
+#         return state_next
+    
+#     def dynamics_multi_step(self, state: np.ndarray, action: float, duration: float, dt: float) -> List[np.ndarray]:
+#         """
+#         Integrate dynamics and return states at checkpoints.
+#         Returns states at times [dt, 2*dt, 3*dt, ..., duration]
+#         """
+#         n_steps = int(np.ceil(duration / dt))
+#         t_eval = np.linspace(0, duration, n_steps + 1)  # Include t=0
+        
+#         solution = odeint(self._dubins_ode, state, t_eval, args=(action,), atol=1e-12, rtol=1e-12)
+        
+#         # Normalize theta for all states
+#         states = []
+#         for s in solution[1:]:  # Skip initial state
+#             theta_normalized = np.arctan2(np.sin(s[2]), np.cos(s[2]))
+#             s[2] = theta_normalized
+#             states.append(s.copy())
+        
+#         return states
+
+#     def failure_function(self, state: np.ndarray) -> float:
+#         pos = state[:2]
+#         dist_to_obstacle = np.linalg.norm(pos - self.obstacle_position)
+#         return (dist_to_obstacle - self.obstacle_radius)
+        
+#     def reward_function(self, state: np.ndarray) -> float:
+#         """
+#         Reward function for reach-avoid with boundary target zone:
+#         - Positive when OUTSIDE the inner box [-2.8, 2.8] × [-2.8, 2.8]
+#         - Negative when inside the inner box
+        
+#         Returns negative signed distance to inner box boundary
+#         (positive in the outer "safety zone")
+#         """
+#         x, y = state[0], state[1]
+        
+#         # Inner box boundaries (target is OUTSIDE this box)
+#         inner_x_min, inner_x_max = -2.5, 2.5
+#         inner_y_min, inner_y_max = -2.5, 2.5
+        
+#         # Distance from inner box boundaries (positive when inside inner box)
+#         dist_to_inner_x_min = x - inner_x_min  # positive if x > -2.5
+#         dist_to_inner_x_max = inner_x_max - x  # positive if x < 2.5
+#         dist_to_inner_y_min = y - inner_y_min  # positive if y > -2.5
+#         dist_to_inner_y_max = inner_y_max - y  # positive if y < 2.5
+        
+#         # Minimum distance to inner box boundary
+#         min_dist_to_inner_boundary = min(
+#             dist_to_inner_x_min, 
+#             dist_to_inner_x_max,
+#             dist_to_inner_y_min, 
+#             dist_to_inner_y_max
+#         )
+        
+#         # Return NEGATIVE of distance
+#         # Positive when OUTSIDE [-2.5, 2.5]² (in the green safety zone)
+#         # Negative when INSIDE [-2.5, 2.5]² (still need to reach safety)
+#         return -min_dist_to_inner_boundary
+#     def get_lipschitz_constants(self) -> Tuple[float, float, float]:  ##changed for RA case
+#         return self.L_f, self.L_l, self.L_r  ##changed for RA case
+    
+#     def get_state_dim(self) -> int:
+#         return 3
 # ----------------------------------------------------------------------------
 # ✈️ 3D Aircraft Evasion Environment (ODEINT-integrated)
 # ----------------------------------------------------------------------------
@@ -973,7 +973,7 @@ class SafetyValueIterator:
                 f"init_resol_{args.initial_resolution}"
             )
             output_dir = os.path.join(
-                "./results_RA/fixed_bellmannew/machineeps/newr",
+                "./results_RA/fixed_bellmannew/machineeps",
                 f"{rname}_{param_suffix}"
             )
         self.output_dir = output_dir
@@ -1926,7 +1926,7 @@ class AdaptiveRefinement:
                 f"init_resol_{args.initial_resolution}"
             )
             output_dir = os.path.join(
-                "./results_RA/fixed_bellmannew/machineeps/newr",
+                "./results_RA/fixed_bellmannew/machineeps",
                 f"{rname}_{param_suffix}"
             )
         self.output_dir = output_dir
@@ -2463,9 +2463,9 @@ def _plot_slice(
         ax.add_patch(obstacle)
         
         # Draw target set  ##changed for RA case
-        # target = Circle(env.target_position, env.target_radius,  ##changed for RA case
-        #                facecolor='none', edgecolor='orange', linewidth=2, zorder=10, linestyle='--')  ##changed for RA case
-        # ax.add_patch(target)  ##changed for RA case
+        target = Circle(env.target_position, env.target_radius,  ##changed for RA case
+                       facecolor='none', edgecolor='orange', linewidth=2, zorder=10, linestyle='--')  ##changed for RA case
+        ax.add_patch(target)  ##changed for RA case
         
     elif isinstance(env, EvasionEnvironment):
         obstacle = Circle(env.obstacle_position, env.obstacle_radius,
@@ -2554,10 +2554,10 @@ def _plot_classification_slice(
                           facecolor='none', edgecolor='darkblue', linewidth=2, zorder=10)
         ax.add_patch(obstacle)
         
-        # # Draw target set  ##changed for RA case
-        # target = Circle(env.target_position, env.target_radius,  ##changed for RA case
-        #                facecolor='none', edgecolor='orange', linewidth=2, zorder=10, linestyle='--')  ##changed for RA case
-        # ax.add_patch(target)  ##changed for RA case
+        # Draw target set  ##changed for RA case
+        target = Circle(env.target_position, env.target_radius,  ##changed for RA case
+                       facecolor='none', edgecolor='orange', linewidth=2, zorder=10, linestyle='--')  ##changed for RA case
+        ax.add_patch(target)  ##changed for RA case
         
     elif isinstance(env, EvasionEnvironment):
         obstacle = Circle((0, 0), env.obstacle_radius,
