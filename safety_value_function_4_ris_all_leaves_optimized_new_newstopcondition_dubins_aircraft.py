@@ -2463,9 +2463,9 @@ def _plot_slice(
         ax.add_patch(obstacle)
         
         # Draw target set  ##changed for RA case
-        target = Circle(env.target_position, env.target_radius,  ##changed for RA case
-                       facecolor='none', edgecolor='orange', linewidth=2, zorder=10, linestyle='--')  ##changed for RA case
-        ax.add_patch(target)  ##changed for RA case
+        # target = Circle(env.target_position, env.target_radius,  ##changed for RA case
+        #                facecolor='none', edgecolor='orange', linewidth=2, zorder=10, linestyle='--')  ##changed for RA case
+        # ax.add_patch(target)  ##changed for RA case
         
     elif isinstance(env, EvasionEnvironment):
         obstacle = Circle(env.obstacle_position, env.obstacle_radius,
@@ -2554,10 +2554,10 @@ def _plot_classification_slice(
                           facecolor='none', edgecolor='darkblue', linewidth=2, zorder=10)
         ax.add_patch(obstacle)
         
-        # Draw target set  ##changed for RA case
-        target = Circle(env.target_position, env.target_radius,  ##changed for RA case
-                       facecolor='none', edgecolor='orange', linewidth=2, zorder=10, linestyle='--')  ##changed for RA case
-        ax.add_patch(target)  ##changed for RA case
+        # # Draw target set  ##changed for RA case
+        # target = Circle(env.target_position, env.target_radius,  ##changed for RA case
+        #                facecolor='none', edgecolor='orange', linewidth=2, zorder=10, linestyle='--')  ##changed for RA case
+        # ax.add_patch(target)  ##changed for RA case
         
     elif isinstance(env, EvasionEnvironment):
         obstacle = Circle((0, 0), env.obstacle_radius,
