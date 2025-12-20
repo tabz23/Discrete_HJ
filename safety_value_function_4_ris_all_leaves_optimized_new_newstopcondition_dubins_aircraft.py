@@ -346,7 +346,7 @@ class EvasionEnvironment(Environment):
     
     def __init__(self, v_const=1.0, dt=0.05, tau=1.0,
                  obstacle_position=(0.0, 0.0),
-                 obstacle_radius=1.0, state_bounds=None):
+                 obstacle_radius=1.0, state_bounds=None,  target_position: np.ndarray = None, target_radius: float = 0.5):
         self.obstacle_position = np.array(obstacle_position)
         self.obstacle_radius = obstacle_radius
         self.v_const = v_const
@@ -370,11 +370,19 @@ class EvasionEnvironment(Environment):
                                           [-np.pi, np.pi]])
         else:
             self.state_bounds = state_bounds
+            
+        # Target set parameters  ##changed for RA case
+        if target_position is None:  ##changed for RA case
+            self.target_position = np.array([2.5, 0])  ##changed for RA case
+        else:  ##changed for RA case
+            self.target_position = target_position  ##changed for RA case
+            
+        self.target_radius = target_radius  ##changed for RA case
 
         self.actions = np.linspace(-1.0, 1.0, 5)
         self.L_f = 1 + self.v_const
         self.L_l = np.sqrt(2)
-        self.L_r = 0.0  ##changed for RA case - reward is constant (always 1), so Lipschitz constant is 0
+        self.L_r = np.sqrt(2)  ##changed for RA case - same as L_l since target is also a circle
 
 
     def get_state_bounds(self) -> np.ndarray:
@@ -424,8 +432,11 @@ class EvasionEnvironment(Environment):
         return np.sqrt(dx**2 + dy**2) - self.obstacle_radius
     
     def reward_function(self, state: np.ndarray) -> float:  ##changed for RA case
-        """Constant reward of 1 (inherently reach-avoid, no explicit target)"""  ##changed for RA case
-        return -np.inf  ##changed for RA case
+        """Negative signed distance to target circle (positive inside target)"""  ##changed for RA case
+        pos = state[:2]  ##changed for RA case
+        dist_to_target = np.linalg.norm(pos - self.target_position)  ##changed for RA case
+        return -(dist_to_target - self.target_radius)  ##changed for RA case
+    
 
     def get_lipschitz_constants(self) -> Tuple[float, float, float]:  ##changed for RA case
         return self.L_f, self.L_l, self.L_r  ##changed for RA case
@@ -2472,6 +2483,12 @@ def _plot_slice(
                           facecolor='none', edgecolor='darkblue', linewidth=2, zorder=10)
         ax.add_patch(obstacle)
 
+        # Draw target set  ##changed for RA case
+        target = Circle(env.target_position, env.target_radius,  ##changed for RA case
+                       facecolor='none', edgecolor='orange', linewidth=2, zorder=10, linestyle='--')  ##changed for RA case
+        ax.add_patch(target)  ##changed for RA case
+        
+
     ax.set_xlabel('x')
     ax.set_ylabel('y')
     ax.set_xlim(x_min, x_max)
@@ -2563,6 +2580,11 @@ def _plot_classification_slice(
         obstacle = Circle((0, 0), env.obstacle_radius,
                           facecolor='none', edgecolor='darkblue', linewidth=2, zorder=10)
         ax.add_patch(obstacle)
+        # Draw target set  ##changed for RA case
+        target = Circle(env.target_position, env.target_radius,  ##changed for RA case
+                       facecolor='none', edgecolor='orange', linewidth=2, zorder=10, linestyle='--')  ##changed for RA case
+        ax.add_patch(target)  ##changed for RA case
+        
     
     ax.set_xlabel('x')
     ax.set_ylabel('y')
