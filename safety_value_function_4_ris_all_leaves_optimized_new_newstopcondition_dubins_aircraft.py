@@ -1243,6 +1243,7 @@ class SafetyValueIterator:
         """
         Run value iteration until convergence (Algorithm 1 or 3).
         """
+        
         self.initialize_cells()
         if not self.successor_cache:
             print("  Precomputing successor sets...")
@@ -1269,7 +1270,7 @@ class SafetyValueIterator:
             prev_upper = {cell.cell_id: cell.V_upper for cell in leaves}
             prev_lower = {cell.cell_id: cell.V_lower for cell in leaves}
                         # ============ ADDED: Detailed debugging output for Phase 0 ============
-            if self.refinement_phase == 0 and plot_freq > 0 and iteration % plot_freq == 0:
+            if self.refinement_phase == 0 and plot_freq > 1 and iteration+1 % plot_freq == 0:
                 print(f"\n{'='*100}")
                 print(f"DETAILED CELL STATE - Iteration {iteration}")
                 print(f"{'='*100}")
@@ -1487,6 +1488,7 @@ class SafetyValueIterator:
         
         
         print(f"\nValue iteration completed in {iteration + 1} iterations")
+
         return np.array(conv_history_upper), np.array(conv_history_lower)
     def local_value_iteration(self, updated_cells: Set[Cell], max_iterations: int = 100,
                     convergence_tol: float = 1e-3, conservative_mode: bool = False, 
@@ -1973,13 +1975,15 @@ class AdaptiveRefinement:
         print(f"Grid: {self.cell_tree.get_num_leaves()} cells")
         
         self.value_iterator.refinement_phase = 0
+        start_timee = time.time() 
         conv_upper, conv_lower = self.value_iterator.value_iteration(
             max_iterations=vi_iterations_per_refinement,
             plot_freq=self.args.plot_freq,
             conservative_mode=self.args.conservative,
             delta_max=self.args.delta_max
         )
-        
+        elapsedd = time.time() - start_timee
+        print(f"total time for running value_iteration the first time (phase 0) on the initial grid including grid initialization, setting up cpu parallelism, successor set computation and value iteration is {elapsedd} seconds")
         # Print initial convergence summary
         if len(conv_upper) > 0:
             print(f"Initial VI completed in {len(conv_upper)} iterations")
@@ -2607,6 +2611,7 @@ def _plot_classification_slice(
 
 
 def run_algorithm_1(args, env):
+    
     print("="*70)
     print("ALGORITHM 1: Discretization Routine")
     print("="*70)
@@ -2685,7 +2690,7 @@ def main():
                        help="Maximum value iterations (Algorithm 1)")
     parser.add_argument('--tolerance', type=float, default=1e-13,
                        help="Convergence tolerance")
-    parser.add_argument('--plot-freq', type=int, default=12, #dont create intermediate plots
+    parser.add_argument('--plot-freq', type=int, default=100, #dont create intermediate plots
                        help="Plot frequency in iterations (Algorithm 1)")
     parser.add_argument('--epsilon', type=float, default=0.1,
                        help="Error tolerance for refinement (Algorithm 2)")
