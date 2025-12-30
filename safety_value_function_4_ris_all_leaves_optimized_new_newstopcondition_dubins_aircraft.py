@@ -984,7 +984,7 @@ class SafetyValueIterator:
                 f"init_resol_{args.initial_resolution}"
             )
             output_dir = os.path.join(
-                "./results_RA/fixed_bellmannew/machineeps",
+                "./results_RA/fixed_bellmannew/machineeps/newruns",
                 f"{rname}_{param_suffix}"
             )
         self.output_dir = output_dir
@@ -1939,7 +1939,7 @@ class AdaptiveRefinement:
                 f"init_resol_{args.initial_resolution}"
             )
             output_dir = os.path.join(
-                "./results_RA/fixed_bellmannew/machineeps",
+                "./results_RA/fixed_bellmannew/machineeps/newruns",
                 f"{rname}_{param_suffix}"
             )
         self.output_dir = output_dir
@@ -2760,3 +2760,27 @@ if __name__ == "__main__":
 #                         --eps 0.05 --dynamics evasion  --conservative  \
 #                             --delta-max 1e-13 \
 #                                  2>&1 | tee ./run_log_evasion.txt
+
+
+
+#  caffeinate -id  python -u safety_value_function_4_ris_all_leaves_optimized_new_newstopcondition_dubins_aircraft.py \
+# --algorithm 2 \
+#     --resolution 50 \
+#         --iterations 2002 \
+#             --gamma  0.96 --dt 0.3 \
+#                 --tau 0.3 --tolerance 1e-2 \
+#                     --initial-resolution 40 --vi-iterations 100001\
+#                         --eps 0.05 --dynamics dubins  --conservative  \
+#                             --delta-max 1e-2 \
+#                                 2>&1 | tee ./run_log_dubins_gamma0.96_dt0.3_tau0.3_res40.txt
+
+#  caffeinate -id  python -u safety_value_function_4_ris_all_leaves_optimized_new_newstopcondition_dubins_aircraft.py \
+# --algorithm 2 \
+#     --resolution 50 \
+#         --iterations 2002 \
+#             --gamma  0.96 --dt 0.25 \
+#                 --tau 0.25 --tolerance 1e-2 \
+#                     --initial-resolution 40 --vi-iterations 100001\
+#                         --eps 0.05 --dynamics evasion  --conservative  \
+#                             --delta-max 1e-2 \
+#                                 2>&1 | tee ./run_log_evasion_gamma0.96_dt0.25_tau0.25_res40.txt
