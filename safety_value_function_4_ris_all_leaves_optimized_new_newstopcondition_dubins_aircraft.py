@@ -473,10 +473,22 @@ class Cell:
     def get_range(self, dim: int) -> float:
         return self.bounds[dim, 1] - self.bounds[dim, 0]
     
-    def get_max_range_dim(self) -> int:
-        ranges = [self.get_range(j) for j in range(len(self.bounds))]
-        return np.argmax(ranges)
+    # def get_max_range_dim(self) -> int:
+    #     ranges = [self.get_range(j) for j in range(len(self.bounds))]
+    #     return np.argmax(ranges)
     
+    def get_max_range_dim(self) -> int:
+        """Get dimension with maximum range, with deterministic tie-breaking."""
+        ranges = [self.get_range(j) for j in range(len(self.bounds))]
+        max_range = max(ranges)
+        
+        # Find all dimensions within floating-point tolerance of max
+        tolerance = 1e-10
+        candidates = [i for i, r in enumerate(ranges) if abs(r - max_range) < tolerance]
+        
+        # Deterministic: always prefer lowest dimension index (x over y over θ)
+        return candidates[0]
+
     def get_max_range(self) -> float:
         dim = self.get_max_range_dim()
         return self.get_range(dim)
@@ -593,7 +605,20 @@ class CellTree:
     def refine_cell(self, cell: Cell):
         if not cell.is_leaf:
             return
+        # ##debug
+        # ranges = [cell.get_range(j) for j in range(len(cell.bounds))]
+        # dim = cell.get_max_range_dim()
         
+        # # Check if we have a near-tie between dimensions
+        # max_range = max(ranges)
+        # near_ties = [i for i, r in enumerate(ranges) if abs(r - max_range) < 1e-10]
+        
+        # if len(near_ties) > 1:
+        #     print(f"⚠️  Cell {cell.cell_id}: Near-tie in dimensions {near_ties}")
+        #     print(f"    Ranges: {[f'{r:.15f}' for r in ranges]}")
+        #     print(f"    Splitting dim {dim}")
+        
+        # ##debug
         child1, child2 = cell.split(self.next_id)
         self.next_id += 2
         
@@ -984,7 +1009,7 @@ class SafetyValueIterator:
                 f"init_resol_{args.initial_resolution}"
             )
             output_dir = os.path.join(
-                "./results_RA/fixed_bellmannew/machineeps/newruns",
+                "./results_RA/fixed_bellmannew/machineeps/newrunsfixgrid",
                 f"{rname}_{param_suffix}"
             )
         self.output_dir = output_dir
@@ -1269,50 +1294,50 @@ class SafetyValueIterator:
             leaves = self.cell_tree.get_leaves()
             prev_upper = {cell.cell_id: cell.V_upper for cell in leaves}
             prev_lower = {cell.cell_id: cell.V_lower for cell in leaves}
-                        # ============ ADDED: Detailed debugging output for Phase 0 ============
-            if self.refinement_phase == 0 and plot_freq > 1 and iteration+1 % plot_freq == 0:
-                print(f"\n{'='*100}")
-                print(f"DETAILED CELL STATE - Iteration {iteration}")
-                print(f"{'='*100}")
+            #             # ============ ADDED: Detailed debugging output for Phase 0 ============
+            # if self.refinement_phase == 0 and plot_freq > 1 and iteration+1 % plot_freq == 0:
+            #     print(f"\n{'='*100}")
+            #     print(f"DETAILED CELL STATE - Iteration {iteration}")
+            #     print(f"{'='*100}")
                 
-                for cell in leaves[0:1]:
-                    print(f"\n--- Cell {cell.cell_id} ---")
-                    print(f"  Bounds: x=[{cell.bounds[0,0]:.6f}, {cell.bounds[0,1]:.6f}], "
-                        f"y=[{cell.bounds[1,0]:.6f}, {cell.bounds[1,1]:.6f}], "
-                        f"θ=[{cell.bounds[2,0]:.6f}, {cell.bounds[2,1]:.6f}]")
-                    print(f"  Center: {cell.center}")
-                    print(f"  l_lower: {cell.l_lower:.10f}")
-                    print(f"  l_upper: {cell.l_upper:.10f}")
-                    print(f"  V_lower: {cell.V_lower:.10f}")
-                    print(f"  V_upper: {cell.V_upper:.10f}")
+            #     for cell in leaves[0:1]:
+            #         print(f"\n--- Cell {cell.cell_id} ---")
+            #         print(f"  Bounds: x=[{cell.bounds[0,0]:.6f}, {cell.bounds[0,1]:.6f}], "
+            #             f"y=[{cell.bounds[1,0]:.6f}, {cell.bounds[1,1]:.6f}], "
+            #             f"θ=[{cell.bounds[2,0]:.6f}, {cell.bounds[2,1]:.6f}]")
+            #         print(f"  Center: {cell.center}")
+            #         print(f"  l_lower: {cell.l_lower:.10f}")
+            #         print(f"  l_upper: {cell.l_upper:.10f}")
+            #         print(f"  V_lower: {cell.V_lower:.10f}")
+            #         print(f"  V_upper: {cell.V_upper:.10f}")
                     
-                    # Show successors for each action
-                    actions = self.env.get_action_space()
-                    for action in actions:
-                        cache_key = (cell.cell_id, action)
-                        if cache_key in self.successor_cache:
-                            succ_ids = self.successor_cache[cache_key]
-                            print(f"\n  Action {action:+.3f} → {len(succ_ids)} successors:")
+            #         # Show successors for each action
+            #         actions = self.env.get_action_space()
+            #         for action in actions:
+            #             cache_key = (cell.cell_id, action)
+            #             if cache_key in self.successor_cache:
+            #                 succ_ids = self.successor_cache[cache_key]
+            #                 print(f"\n  Action {action:+.3f} → {len(succ_ids)} successors:")
                             
-                            if len(succ_ids) == 0:
-                                print(f"    (No successors)")
-                            else:
-                                # Get successor cells
-                                cell_id_to_cell = {c.cell_id: c for c in leaves}
-                                for succ_id in succ_ids:
-                                    if succ_id in cell_id_to_cell:
-                                        succ = cell_id_to_cell[succ_id]
-                                        print(f"    → Cell {succ.cell_id}:")
-                                        print(f"       Bounds: x=[{succ.bounds[0,0]:.6f}, {succ.bounds[0,1]:.6f}], "
-                                            f"y=[{succ.bounds[1,0]:.6f}, {succ.bounds[1,1]:.6f}], "
-                                            f"θ=[{succ.bounds[2,0]:.6f}, {succ.bounds[2,1]:.6f}]")
-                                        print(f"       l_lower: {succ.l_lower:.10f}, l_upper: {succ.l_upper:.10f}")
-                                        print(f"       V_lower: {succ.V_lower:.10f}, V_upper: {succ.V_upper:.10f}")
-                        else:
-                            print(f"\n  Action {action:+.3f} → (No cache entry)")
+            #                 if len(succ_ids) == 0:
+            #                     print(f"    (No successors)")
+            #                 else:
+            #                     # Get successor cells
+            #                     cell_id_to_cell = {c.cell_id: c for c in leaves}
+            #                     for succ_id in succ_ids:
+            #                         if succ_id in cell_id_to_cell:
+            #                             succ = cell_id_to_cell[succ_id]
+            #                             print(f"    → Cell {succ.cell_id}:")
+            #                             print(f"       Bounds: x=[{succ.bounds[0,0]:.6f}, {succ.bounds[0,1]:.6f}], "
+            #                                 f"y=[{succ.bounds[1,0]:.6f}, {succ.bounds[1,1]:.6f}], "
+            #                                 f"θ=[{succ.bounds[2,0]:.6f}, {succ.bounds[2,1]:.6f}]")
+            #                             print(f"       l_lower: {succ.l_lower:.10f}, l_upper: {succ.l_upper:.10f}")
+            #                             print(f"       V_lower: {succ.V_lower:.10f}, V_upper: {succ.V_upper:.10f}")
+            #             else:
+            #                 print(f"\n  Action {action:+.3f} → (No cache entry)")
                 
-                print(f"\n{'='*100}\n")
-            # ============ END ADDED SECTION ============
+            #     print(f"\n{'='*100}\n")
+            # # ============ END ADDED SECTION ============
                 
             # Build compact numpy arrays for efficient parallel processing
             n_cells = len(leaves)
@@ -1939,7 +1964,7 @@ class AdaptiveRefinement:
                 f"init_resol_{args.initial_resolution}"
             )
             output_dir = os.path.join(
-                "./results_RA/fixed_bellmannew/machineeps/newruns",
+                "./results_RA/fixed_bellmannew/machineeps/newrunsfixgrid",
                 f"{rname}_{param_suffix}"
             )
         self.output_dir = output_dir
@@ -2690,7 +2715,7 @@ def main():
                        help="Maximum value iterations (Algorithm 1)")
     parser.add_argument('--tolerance', type=float, default=1e-13,
                        help="Convergence tolerance")
-    parser.add_argument('--plot-freq', type=int, default=100, #dont create intermediate plots
+    parser.add_argument('--plot-freq', type=int, default=1000, #dont create intermediate plots
                        help="Plot frequency in iterations (Algorithm 1)")
     parser.add_argument('--epsilon', type=float, default=0.1,
                        help="Error tolerance for refinement (Algorithm 2)")
@@ -2760,27 +2785,3 @@ if __name__ == "__main__":
 #                         --eps 0.05 --dynamics evasion  --conservative  \
 #                             --delta-max 1e-13 \
 #                                  2>&1 | tee ./run_log_evasion.txt
-
-
-
-#  caffeinate -id  python -u safety_value_function_4_ris_all_leaves_optimized_new_newstopcondition_dubins_aircraft.py \
-# --algorithm 2 \
-#     --resolution 50 \
-#         --iterations 2002 \
-#             --gamma  0.96 --dt 0.3 \
-#                 --tau 0.3 --tolerance 1e-2 \
-#                     --initial-resolution 40 --vi-iterations 100001\
-#                         --eps 0.05 --dynamics dubins  --conservative  \
-#                             --delta-max 1e-2 \
-#                                 2>&1 | tee ./run_log_dubins_gamma0.96_dt0.3_tau0.3_res40.txt
-
-#  caffeinate -id  python -u safety_value_function_4_ris_all_leaves_optimized_new_newstopcondition_dubins_aircraft.py \
-# --algorithm 2 \
-#     --resolution 50 \
-#         --iterations 2002 \
-#             --gamma  0.96 --dt 0.25 \
-#                 --tau 0.25 --tolerance 1e-2 \
-#                     --initial-resolution 40 --vi-iterations 100001\
-#                         --eps 0.05 --dynamics evasion  --conservative  \
-#                             --delta-max 1e-2 \
-#                                 2>&1 | tee ./run_log_evasion_gamma0.96_dt0.25_tau0.25_res40.txt
